@@ -43,6 +43,9 @@ parse_task_timeout = generic_json_rpc_package.parse_task_timeout
 parse_data = generic_json_rpc_package.parse_data
 
 
+LIVE_FGT_DEVICE_NAME = os.getenv("LIVE_FGT_DEVICE_NAME")
+FGT_ASSIGNED_POL_PKG = os.getenv("FGT_ASSIGNED_POL_PKG")
+
 @pytest.fixture(params=["Username/Password", "API Key"])
 def auth_config(request):
     base_config = {
@@ -251,6 +254,278 @@ def test_parse_task_timeout(auth_config):
         assert task_timeout == expected_task_timeout, f"Expected task_timeout {expected_task_timeout} but got {task_timeout}"
 
 
+### Device FGT2 needs to be an install target of the "default" pacakge for the following tests to pass
+def test_track_task_parameters(auth_config):
+    """Test different track task timeout parameters"""
+    test_cases = [
+        {
+            "name": "Default timeouts",
+            "params": {
+                "url": "/securityconsole/install/package",
+                "data": {
+                    "adom": "root",
+                    "pkg": FGT_ASSIGNED_POL_PKG,
+                    "flags": ["preview"],
+                    "scope": [
+                        {
+                            "name": LIVE_FGT_DEVICE_NAME,
+                            "vdom": "root"
+                        }
+                    ]
+                },
+                "track_task": True
+            },
+            "expected_timeout": 21600,
+            "expected_zero_percent_timeout": 30,
+            "expected_stale_timeout": 120,
+            "expected_delete_on_timeout": True
+        },
+        {
+            "name": "Custom timeouts",
+            "params": {
+                "url": "/securityconsole/install/package",
+                "data": {
+                    "adom": "root",
+                    "pkg": FGT_ASSIGNED_POL_PKG,
+                    "flags": ["preview"],
+                    "scope": [
+                        {
+                            "name": LIVE_FGT_DEVICE_NAME,
+                            "vdom": "root"
+                        }
+                    ]
+                },
+                "track_task": True,
+                "task_timeout": 300,
+                "zero_percent_timeout": 60,
+                "task_stale_timeout": 180,
+                "delete_task_on_timeout": False
+            },
+            "expected_timeout": 300,
+            "expected_zero_percent_timeout": 60,
+            "expected_stale_timeout": 180,
+            "expected_delete_on_timeout": False
+        }
+    ]
+
+    for test_case in test_cases:
+        try:
+            logger.info(f"Running test case: {test_case['name']}")
+            response = operations['json_rpc_execute'](auth_config, test_case['params'])
+
+            # Verify the response structure
+            assert response.get("status", None) == 0, f"Execute operation failed with status {response.get('status')}"
+            assert "execute_response" in response, "Response missing 'execute_response' key"
+            assert "task_response" in response, "Response missing 'task_response' key"
+
+            # Verify task tracking parameters through debug logs
+            # Note: Since we can't directly access the internal track_task parameters,
+            # we're verifying the behavior through the response
+            task_response = response.get("task_response", {})
+            assert "percent" in task_response, "Task response missing 'percent' key"
+            assert task_response.get("percent") == 100, "Task did not complete successfully"
+
+            logger.info(f"Test case {test_case['name']} passed successfully")
+
+        except Exception as e:
+            logger.error(f"Test case {test_case['name']} failed: {str(e)}")
+            raise
+
+
+def test_task_timeout_behavior(auth_config):
+    """Test task timeout behavior with an intentionally short timeout"""
+    params = {
+        "url": "/securityconsole/install/package",
+        "data": {
+            "adom": "root",
+            "pkg": FGT_ASSIGNED_POL_PKG,
+            "flags": ["preview"],
+            "scope": [
+                {
+                    "name": LIVE_FGT_DEVICE_NAME,
+                    "vdom": "root"
+                }
+            ]
+        },
+        "track_task": True,
+        "task_timeout": 1,  # Very short timeout to force timeout condition
+        "zero_percent_timeout": 60,
+        "task_stale_timeout": 3,
+        "delete_task_on_timeout": True
+    }
+
+    try:
+        result = operations['json_rpc_execute'](auth_config, params)
+        task_timeout = params.get("task_timeout")
+        task_id = result.get("execute_response", {}).get("task_id") or result.get("execute_response", {}).get("task")
+
+        # Verify response structure
+        assert isinstance(result, dict), "Expected result to be a dict"
+        assert "task_response" in result, "Response missing 'task_response' key"
+        task_result = result.get("task_response")
+        assert "msg" in task_result, "Task response missing 'msg' key"
+
+        # Verify timeout message
+        expected_msg = f'Task {task_id} did not complete in efficient time and timed out. The timeout value was {task_timeout}. The task will be deleted.'
+        assert task_result.get("msg") == expected_msg, "Expected timeout message"
+
+        # Verify task deletion
+        verify_params = {
+            "url": f"/task/task/{task_id}",
+        }
+        response = operations['json_rpc_get'](auth_config, verify_params)
+        assert response.get("status") == -3, "Task should have been deleted"
+
+    except Exception as e:
+        logger.error(f"Task timeout test failed: {str(e)}")
+        raise
+
+
+def test_task_delete_disabled(auth_config):
+    """Test behavior when delete_task_on_timeout is False"""
+    params = {
+        "url": "/securityconsole/install/package",
+        "data": {
+            "adom": "root",
+            "pkg": FGT_ASSIGNED_POL_PKG,
+            "flags": ["preview"],
+            "scope": [
+                {
+                    "name": LIVE_FGT_DEVICE_NAME,
+                    "vdom": "root"
+                }
+            ]
+        },
+        "track_task": True,
+        "task_timeout": 1,
+        "zero_percent_timeout": 10,
+        "task_stale_timeout": 10,
+        "delete_task_on_timeout": False
+    }
+
+    try:
+        result = operations['json_rpc_execute'](auth_config, params)
+        task_id = result.get("execute_response", {}).get("task_id") or result.get("execute_response", {}).get("task")
+
+        # Verify response structure
+        assert isinstance(result, dict), "Expected result to be a dict"
+        assert "task_response" in result, "Response missing 'task_response' key"
+        task_result = result.get("task_response")
+        assert "msg" in task_result, "Task response missing 'msg' key"
+
+        # Verify timeout message without deletion
+        expected_msg = f'Task {task_id} did not complete in efficient time and timed out. The timeout value was {params["task_timeout"]}.'
+        assert task_result.get("msg") == expected_msg, "Expected timeout message without deletion notice"
+
+        # Verify task still exists
+        verify_params = {
+            "url": f"/task/task/{task_id}",
+        }
+        response = operations['json_rpc_get'](auth_config, verify_params)
+        assert response.get("status") == 0, "Task should still exist"
+        assert "get_response" in response, "Response missing 'get_response' key"
+
+    except Exception as e:
+        logger.error(f"Task deletion disabled test failed: {str(e)}")
+        raise
+
+
+def test_zero_percent_timeout(auth_config):
+    """Test zero percent timeout behavior"""
+    params = {
+        "url": "/securityconsole/install/package",
+        "data": {
+            "adom": "root",
+            "pkg": FGT_ASSIGNED_POL_PKG,
+            "flags": ["preview"],
+            "scope": [
+                {
+                    "name": LIVE_FGT_DEVICE_NAME,
+                    "vdom": "root"
+                }
+            ]
+        },
+        "track_task": True,
+        "task_timeout": 30,
+        "zero_percent_timeout": 2,  # Very short zero percent timeout
+        "task_stale_timeout": 20,
+        "delete_task_on_timeout": True
+    }
+
+    try:
+        result = operations['json_rpc_execute'](auth_config, params)
+        task_id = result.get("execute_response", {}).get("task_id") or result.get("execute_response", {}).get("task")
+
+        # Verify response structure
+        assert isinstance(result, dict), "Expected result to be a dict"
+        assert "task_response" in result, "Response missing 'task_response' key"
+        task_result = result.get("task_response")
+        assert "msg" in task_result, "Task response missing 'msg' key"
+
+        # Verify zero percent timeout message
+        expected_msg = f'Task {task_id} remained at 0% for too long and timed out. The zero percent timeout value was {params["zero_percent_timeout"]}. The task will be deleted.'
+        assert task_result.get("msg") == expected_msg, "Expected zero percent timeout message"
+
+        # Verify task deletion
+        verify_params = {
+            "url": f"/task/task/{task_id}",
+        }
+        response = operations['json_rpc_get'](auth_config, verify_params)
+        assert response.get("status") == -3, "Task should have been deleted"
+
+    except Exception as e:
+        logger.error(f"Zero percent timeout test failed: {str(e)}")
+        raise
+
+
+def test_stale_task_timeout(auth_config):
+    """Test stale task timeout behavior"""
+    params = {
+        "url": "/securityconsole/install/package",
+        "data": {
+            "adom": "root",
+            "pkg": FGT_ASSIGNED_POL_PKG,
+            "flags": ["preview"],
+            "scope": [
+                {
+                    "name": LIVE_FGT_DEVICE_NAME,
+                    "vdom": "root"
+                }
+            ]
+        },
+        "track_task": True,
+        "task_timeout": 30,
+        "zero_percent_timeout": 10,
+        "task_stale_timeout": 2,  # Very short stale timeout
+        "delete_task_on_timeout": True
+    }
+
+    try:
+        result = operations['json_rpc_execute'](auth_config, params)
+        task_id = result.get("execute_response", {}).get("task_id") or result.get("execute_response", {}).get("task")
+
+        # Verify response structure
+        assert isinstance(result, dict), "Expected result to be a dict"
+        assert "task_response" in result, "Response missing 'task_response' key"
+        task_result = result.get("task_response")
+        assert "msg" in task_result, "Task response missing 'msg' key"
+
+        # Verify stale task timeout message
+        expected_msg = f'Task {task_id} progress remained unchanged for too long and timed out. The stale timeout value was {params["task_stale_timeout"]}. The task will be deleted.'
+        assert task_result.get("msg") == expected_msg, "Expected stale task timeout message"
+
+        # Verify task deletion
+        verify_params = {
+            "url": f"/task/task/{task_id}",
+        }
+        response = operations['json_rpc_get'](auth_config, verify_params)
+        assert response.get("status") == -3, "Task should have been deleted"
+
+    except Exception as e:
+        logger.error(f"Stale task timeout test failed: {str(e)}")
+        raise
+
+
 # Test the add operation by adding an address object
 def test_rpc_add(setup_params):
     auth_config, params_add, params_delete = setup_params
@@ -450,7 +725,7 @@ def test_special_case(auth_config):
             "adom": "root",
             "scope": [
                 {
-                    "name": "FGT2",
+                    "name": LIVE_FGT_DEVICE_NAME,
                     "vdom": "root"
                 }
             ]
