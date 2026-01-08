@@ -410,6 +410,166 @@
         }
       ],
       "output_schema": {}
+    },
+    {
+      "operation": "get_fortimanager_device_stats",
+      "title": "Get FortiManager Device Stats",
+      "annotation": "get_fortimanager_device_stats",
+      "description": "Gather comprehensive device statistics including device details, firewall policies, and policy statistics. Automatically merges policy data with statistics for complete visibility.",
+      "category": "investigation",
+      "is_config_required": true,
+      "visible": true,
+      "enabled": true,
+      "parameters": [
+        {
+          "name": "device_targets",
+          "title": "Device Targets",
+          "type": "json",
+          "editable": true,
+          "visible": true,
+          "required": true,
+          "placeholder": [
+            "device/FGT1",
+            "device/FGT2"
+          ],
+          "description": "List of device paths to gather statistics from (e.g., ['device/FGT1', 'device/FGT2'])"
+        },
+        {
+          "name": "vdom",
+          "title": "VDOM",
+          "type": "text",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": "root",
+          "placeholder": "root",
+          "description": "Virtual domain to query. Defaults to 'root'"
+        },
+        {
+          "name": "include_device_info",
+          "title": "Include Device Info",
+          "type": "checkbox",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": true,
+          "description": "Include device details such as uptime, firmware version, and HA status"
+        },
+        {
+          "name": "include_policies",
+          "title": "Include Firewall Policies",
+          "type": "checkbox",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": true,
+          "description": "Include firewall policy configuration"
+        },
+        {
+          "name": "include_policy_stats",
+          "title": "Include Policy Statistics",
+          "type": "checkbox",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": true,
+          "description": "Include firewall policy statistics (hit count, bytes, packets, etc.)"
+        },
+        {
+          "name": "merge_stats",
+          "title": "Merge Stats with Policies",
+          "type": "checkbox",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": true,
+          "description": "Merge policy statistics into policy data for unified view"
+        },
+        {
+          "name": "policy_fields",
+          "title": "Policy Fields",
+          "type": "json",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "placeholder": [
+            "policyid",
+            "name",
+            "status",
+            "action",
+            "srcintf",
+            "dstintf",
+            "srcaddr",
+            "dstaddr",
+            "schedule",
+            "service",
+            "logtraffic",
+            "nat",
+            "comments"
+          ],
+          "description": "Specific policy fields to retrieve. Leave empty for default fields."
+        },
+        {
+          "name": "stat_fields",
+          "title": "Statistics Fields",
+          "type": "json",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "placeholder": [
+            "policyid",
+            "bytes",
+            "packets",
+            "last_used",
+            "first_used",
+            "hit_count"
+          ],
+          "description": "Specific statistics fields to retrieve. Leave empty for default fields."
+        }
+      ],
+      "output_schema": {
+        "status": "",
+        "devices": [
+          {
+            "target": "",
+            "status": "",
+            "device_details": {
+              "serial": "",
+              "hostname": "",
+              "version": "",
+              "uptime": "",
+              "model": "",
+              "operation_mode": ""
+            },
+            "ha_status": {
+              "ha_enabled": "",
+              "ha_peers": []
+            },
+            "policies": [
+              {
+                "policyid": "",
+                "name": "",
+                "status": "",
+                "action": "",
+                "statistics": {
+                  "bytes": "",
+                  "packets": "",
+                  "hit_count": "",
+                  "first_used": "",
+                  "last_used": ""
+                }
+              }
+            ],
+            "policy_count": "",
+            "errors": []
+          }
+        ],
+        "summary": {
+          "total_devices": "",
+          "devices_processed": "",
+          "devices_failed": ""
+        }
+      }
     }
   ]
 }

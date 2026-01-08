@@ -7,6 +7,7 @@ Copyright end
 
 from connectors.core.connector import get_logger, ConnectorError
 from .generic_json_rpc import perform_rpc_action
+from .fortimanager_device_stats import get_fortimanager_device_stats
 
 logger = get_logger('fortinet-fortimanager-json-rpc')
 
@@ -82,5 +83,6 @@ operations = {
     'json_rpc_execute': json_rpc_execute,
     'json_rpc_delete': json_rpc_delete,
     'json_rpc_freeform': json_rpc_freeform,
+    'get_fortimanager_device_stats': get_fortimanager_device_stats,
     'check_health': _check_health
 }
