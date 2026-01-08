@@ -64,8 +64,24 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
             "policyid", "bytes", "packets", "last_used", "first_used", "hit_count"
         ]
 
-        policy_fields = params.get("policy_fields", default_policy_fields) or default_policy_fields
-        stat_fields = params.get("stat_fields", default_stat_fields) or default_stat_fields
+        policy_fields = params.get("policy_fields", [])
+        stat_fields = params.get("stat_fields", [])
+
+        if not isinstance(policy_fields, list):
+            try:
+                policy_fields = json.loads(policy_fields)
+                if not policy_fields:
+                    policy_fields = default_policy_fields
+            except Exception as e:
+                raise ConnectorError("policy_fields must be a list of policy fields")
+
+        if not isinstance(stat_fields, list):
+            try:
+                stat_fields = json.loads(stat_fields)
+                if not stat_fields:
+                    stat_fields = default_stat_fields
+            except Exception as e:
+                raise ConnectorError("stat_fields must be a list of stat_fields")
 
         # Initialize result structure
         result = {
@@ -78,7 +94,22 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
             }
         }
 
-        # Process each device
+        # Batch get device information for all devices
+        device_info_map = {}
+        if include_device_info:
+            device_info_map = _get_device_info_batch(config, device_targets, vdom)
+
+        # Batch get firewall policies for all devices
+        policies_map = {}
+        if include_policies:
+            policies_map = _get_firewall_policies_batch(config, device_targets, vdom, policy_fields)
+
+        # Batch get firewall policy statistics for all devices
+        stats_map = {}
+        if include_policy_stats:
+            stats_map = _get_firewall_stats_batch(config, device_targets, vdom, stat_fields)
+
+        # Process each device with batched data
         for device_target in device_targets:
             device_data = {
                 "target": device_target,
@@ -87,30 +118,29 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
             }
 
             try:
-                # Get device information
-                if include_device_info:
-                    device_info = _get_device_info(config, device_target, vdom)
-                    device_data.update(device_info)
+                # Add device information
+                if include_device_info and device_target in device_info_map:
+                    device_data.update(device_info_map[device_target])
 
-                # Get firewall policies
+                # Add firewall policies
                 policies = []
-                if include_policies:
-                    policies = _get_firewall_policies(config, device_target, vdom, policy_fields)
+                if include_policies and device_target in policies_map:
+                    policies = policies_map[device_target]
                     device_data["policies"] = policies
                     device_data["policy_count"] = len(policies)
 
-                # Get firewall policy statistics
+                # Add firewall policy statistics
                 stats = []
-                if include_policy_stats:
-                    stats = _get_firewall_stats(config, device_target, vdom, stat_fields)
-                    device_data["policy_stats"] = stats
+                if include_policy_stats and device_target in stats_map:
+                    stats = stats_map[device_target]
+                    # device_data["policy_stats"] = stats
 
                 # Merge stats with policies if requested
-                if merge_stats and include_policies and include_policy_stats:
+                if merge_stats and include_policies and include_policy_stats and policies and stats:
                     merged_policies = _merge_policies_and_stats(policies, stats)
                     device_data["policies"] = merged_policies
                     # Keep raw stats for reference
-                    device_data["raw_policy_stats"] = stats
+                    # device_data["raw_policy_stats"] = stats
 
                 device_data["status"] = "success"
                 result["summary"]["devices_processed"] += 1
@@ -128,6 +158,90 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
     except Exception as e:
         logger.exception(f"Error in get_fortimanager_device_stats: {str(e)}")
         raise ConnectorError(str(e))
+
+
+def _get_device_info_batch(config: dict, device_targets: List[str], vdom: str) -> dict:
+    """Get device information for multiple devices in batch"""
+    device_info_map = {}
+
+    try:
+        # Batch request for system status
+        status_payload = {
+            "url": "/sys/proxy/json",
+            "data": {
+                "action": "get",
+                "target": device_targets,
+                "resource": f"/api/v2/monitor/system/status?vdom={vdom}"
+            }
+        }
+
+        response = perform_rpc_action("free_form", config, {
+            "method": "exec",
+            "data": [status_payload]
+        })
+
+        if response.get("status") == 200 and response.get("free_form_response"):
+            # Process each device's response
+            for idx, result in enumerate(response["free_form_response"][0]["data"]):
+                device_target = device_targets[idx]
+                device_info_map[device_target] = {
+                    "device_details": {},
+                    "ha_status": {}
+                }
+
+                if result.get("status", {}).get("code") == 0:
+                    sys_status = result.get("response", {})
+                    print(json.dumps(sys_status, indent=4))
+                    device_info_map[device_target]["device_details"] = {
+                        "serial": sys_status.get("serial"),
+                        "hostname": sys_status.get("hostname"),
+                        "version": sys_status.get("version"),
+                        "uptime": sys_status.get("uptime"),
+                        "model": sys_status.get("model"),
+                        "operation_mode": sys_status.get("operation_mode")
+                    }
+                else:
+                    device_info_map[device_target]["errors"] = [f"Failed to get system status: {result.get('status', {}).get('message')}"]
+
+        # Batch request for HA status
+        ha_payload = {
+            "url": "/sys/proxy/json",
+            "data": {
+                "action": "get",
+                "target": device_targets,
+                "resource": f"/api/v2/monitor/system/ha-peer?vdom={vdom}"
+            }
+        }
+
+        ha_response = perform_rpc_action("free_form", config, {
+            "method": "exec",
+            "data": [ha_payload]
+        })
+
+        if ha_response.get("status") == 200 and ha_response.get("free_form_response"):
+            # Process each device's HA response
+            for idx, result in enumerate(ha_response["free_form_response"][0]["data"]):
+                device_target = device_targets[idx]
+
+                if device_target in device_info_map and result.get("status", {}).get("code") == 0:
+                    ha_data = result.get("response", {})
+                    device_info_map[device_target]["ha_status"] = {
+                        "ha_enabled": len(ha_data.get("results", [])) > 0,
+                        "ha_peers": ha_data.get("results", [])
+                    }
+
+    except Exception as e:
+        logger.warning(f"Could not retrieve device info in batch: {str(e)}")
+        # Initialize empty structures for all devices on error
+        for device_target in device_targets:
+            if device_target not in device_info_map:
+                device_info_map[device_target] = {
+                    "device_details": {},
+                    "ha_status": {},
+                    "errors": [f"Device info retrieval error: {str(e)}"]
+                }
+
+    return device_info_map
 
 
 def _get_device_info(config: dict, device_target: str, vdom: str) -> dict:
@@ -193,6 +307,53 @@ def _get_device_info(config: dict, device_target: str, vdom: str) -> dict:
     return device_info
 
 
+def _get_firewall_policies_batch(config: dict, device_targets: List[str], vdom: str,
+                                 fields: Optional[List[str]] = None) -> dict:
+    """Get firewall policies for multiple devices in batch"""
+    policies_map = {}
+
+    try:
+        # Build format parameter
+        format_param = ""
+        if fields:
+            format_param = f"&format={('|'.join(fields))}"
+
+        policy_payload = {
+            "url": "/sys/proxy/json",
+            "data": {
+                "action": "get",
+                "target": device_targets,
+                "resource": f"/api/v2/cmdb/firewall/policy?vdom={vdom}{format_param}"
+            }
+        }
+
+        response = perform_rpc_action("free_form", config, {
+            "method": "exec",
+            "data": [policy_payload]
+        })
+
+        if response.get("status") == 200 and response.get("free_form_response"):
+            # Process each device's response
+            for idx, result in enumerate(response["free_form_response"][0]["data"]):
+                device_target = device_targets[idx]
+                policies = []
+
+                if result.get("status", {}).get("code") == 0:
+                    results = result.get("response", {}).get("results", [])
+                    # Clean up policies - flatten list fields
+                    for policy in results:
+                        cleaned_policy = _clean_policy_data(policy)
+                        policies.append(cleaned_policy)
+
+                policies_map[device_target] = policies
+
+    except Exception as e:
+        logger.error(f"Error retrieving firewall policies in batch: {str(e)}")
+        raise
+
+    return policies_map
+
+
 def _get_firewall_policies(config: dict, device_target: str, vdom: str,
                            fields: Optional[List[str]] = None) -> List[dict]:
     """Get firewall policies for a device"""
@@ -231,6 +392,50 @@ def _get_firewall_policies(config: dict, device_target: str, vdom: str,
         raise
 
     return policies
+
+
+def _get_firewall_stats_batch(config: dict, device_targets: List[str], vdom: str,
+                              fields: Optional[List[str]] = None) -> dict:
+    """Get firewall policy statistics for multiple devices in batch"""
+    stats_map = {}
+
+    try:
+        # Build format parameter
+        format_param = ""
+        if fields:
+            format_param = f"&format={('|'.join(fields))}"
+
+        stats_payload = {
+            "url": "/sys/proxy/json",
+            "data": {
+                "action": "get",
+                "target": device_targets,
+                "resource": f"/api/v2/monitor/firewall/policy?vdom={vdom}{format_param}"
+            }
+        }
+
+        response = perform_rpc_action("free_form", config, {
+            "method": "exec",
+            "data": [stats_payload]
+        })
+
+        if response.get("status") == 200 and response.get("free_form_response"):
+            # Process each device's response
+            for idx, result in enumerate(response["free_form_response"][0]["data"]):
+                device_target = device_targets[idx]
+                stats = []
+
+                if result.get("status", {}).get("code") == 0:
+                    results = result.get("response", {}).get("results", [])
+                    stats = results
+
+                stats_map[device_target] = stats
+
+    except Exception as e:
+        logger.error(f"Error retrieving firewall stats in batch: {str(e)}")
+        raise
+
+    return stats_map
 
 
 def _get_firewall_stats(config: dict, device_target: str, vdom: str,
