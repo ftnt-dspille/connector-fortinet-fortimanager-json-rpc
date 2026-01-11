@@ -1,6 +1,6 @@
 {
   "name": "fortinet-fortimanager-json-rpc",
-  "version": "1.1.0",
+  "version": "1.2.2",
   "label": "Fortinet FortiManager JSON RPC",
   "description": "The Fortinet FortiManager JSON RPC Connector is an advanced connector with freeform actions to use the JSON-RPC API directly. This connector puts the onus on the user to understand the FortiManager API. To use the connector that simplify actions please see the original Fortinet FortiManager Connector.",
   "publisher": "Fortinet CSE",
@@ -47,7 +47,10 @@
               "editable": true,
               "visible": true,
               "required": true,
-              "description": "Username with JSON-RPC enabled to access the Fortinet FortiManager server to which you will connect and perform the automated operations."
+              "description": "Username with JSON-RPC enabled to access the Fortinet FortiManager server to which you will connect and perform the automated operations.",
+              "isOnChange": true,
+              "onChangeParam": "Authentication Method",
+              "onChangeOption": "Username/Password"
             },
             {
               "name": "password",
@@ -56,7 +59,10 @@
               "editable": true,
               "visible": true,
               "required": true,
-              "description": "Password to access the Fortinet FortiManager server to which you will connect and perform the automated operations."
+              "description": "Password to access the Fortinet FortiManager server to which you will connect and perform the automated operations.",
+              "isOnChange": true,
+              "onChangeParam": "Authentication Method",
+              "onChangeOption": "Username/Password"
             }
           ],
           "API Key": [
@@ -68,10 +74,14 @@
               "type": "password",
               "name": "api_key",
               "description": "API key to access the Fortinet FortiManager server to which you will connect and perform the automated operations.",
-              "tooltip": "Your FortiManager api key"
+              "tooltip": "Your FortiManager api key",
+              "isOnChange": true,
+              "onChangeParam": "Authentication Method",
+              "onChangeOption": "API Key"
             }
           ]
-        }
+        },
+        "isOnChange": false
       },
       {
         "name": "port",
@@ -272,7 +282,10 @@
                 "editable": true,
                 "value": 21600,
                 "description": "The time in seconds to wait for the task to complete before returning an error",
-                "tooltip": "The time in seconds to wait for the task to complete before returning an error"
+                "tooltip": "The time in seconds to wait for the task to complete before returning an error",
+                "isOnChange": true,
+                "onChangeParam": "Track Task",
+                "onChangeOption": "true"
               },
               {
                 "title": "Zero Percent Timeout",
@@ -283,7 +296,10 @@
                 "editable": true,
                 "value": 30,
                 "description": "Timeout of task that has not progressed past 0%",
-                "tooltip": "Timeout of task that has not progressed past 0%"
+                "tooltip": "Timeout of task that has not progressed past 0%",
+                "isOnChange": true,
+                "onChangeParam": "Track Task",
+                "onChangeOption": "true"
               },
               {
                 "title": "Task Stale Timeout",
@@ -294,7 +310,10 @@
                 "editable": true,
                 "value": 120,
                 "description": "Timeout of task that has started but has not progressed",
-                "tooltip": "Timeout of task that has started but has not progressed"
+                "tooltip": "Timeout of task that has started but has not progressed",
+                "isOnChange": true,
+                "onChangeParam": "Track Task",
+                "onChangeOption": "true"
               },
               {
                 "title": "Delete Task On Timeout",
@@ -305,7 +324,10 @@
                 "editable": true,
                 "value": true,
                 "description": "If a task fails to complete it should be deleted before starting a new task on the device",
-                "tooltip": "If a task fails to complete it should be deleted before starting a new task on the device"
+                "tooltip": "If a task fails to complete it should be deleted before starting a new task on the device",
+                "isOnChange": true,
+                "onChangeParam": "Track Task",
+                "onChangeOption": "true"
               }
             ]
           }
@@ -415,24 +437,21 @@
       "operation": "get_fortimanager_device_stats",
       "title": "Get FortiManager Device Stats",
       "annotation": "get_fortimanager_device_stats",
-      "description": "Gather comprehensive device statistics including device details, firewall policies, and policy statistics. Automatically merges policy data with statistics for complete visibility.",
+      "description": "Gather comprehensive FortiManager device statistics including device details from /dvmdb/device, firewall policies, and policy statistics with batch processing",
       "category": "investigation",
       "is_config_required": true,
       "visible": true,
       "enabled": true,
       "parameters": [
         {
-          "name": "device_targets",
-          "title": "Device Targets",
-          "type": "json",
+          "name": "adom",
+          "title": "ADOM",
+          "type": "text",
           "editable": true,
           "visible": true,
-          "required": true,
-          "placeholder": [
-            "device/FGT1",
-            "device/FGT2"
-          ],
-          "description": "List of device paths to gather statistics from (e.g., ['device/FGT1', 'device/FGT2'])"
+          "required": false,
+          "value": "root",
+          "description": "ADOM to query devices from. Default is \u0027root\u0027."
         },
         {
           "name": "vdom",
@@ -442,38 +461,81 @@
           "visible": true,
           "required": false,
           "value": "root",
-          "placeholder": "root",
-          "description": "Virtual domain to query. Defaults to 'root'"
+          "description": "VDOM to query on devices. Default is \u0027root\u0027."
         },
         {
-          "name": "include_device_info",
-          "title": "Include Device Info",
-          "type": "checkbox",
+          "name": "device_filter",
+          "title": "Device Filter",
+          "type": "json",
           "editable": true,
           "visible": true,
           "required": false,
-          "value": true,
-          "description": "Include device details such as uptime, firmware version, and HA status"
+          "value": [
+            [
+              "os_type",
+              "\u003d\u003d",
+              "fos"
+            ],
+            "\u0026\u0026",
+            [
+              "conn_status",
+              "\u003d\u003d",
+              "up"
+            ]
+          ],
+          "description": "Filter criteria for devices. Example: [[\"os_type\",\"\u003d\u003d\",\"fos\"],\"\u0026\u0026\",[\"conn_status\",\"\u003d\u003d\",\"up\"]]. Leave empty for default filter (FortiGate devices that are up)."
+        },
+        {
+          "name": "device_fields",
+          "title": "Device Fields",
+          "type": "json",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": [
+            "name",
+            "hostname",
+            "platform_str",
+            "os_ver",
+            "ip",
+            "sn"
+          ],
+          "description": "List of device fields to retrieve from /dvmdb/device. Example: [\"name\",\"hostname\",\"platform_str\",\"os_ver\",\"ip\",\"sn\"]. Leave empty for default fields."
+        },
+        {
+          "name": "device_options",
+          "title": "Device Options",
+          "type": "json",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": [
+            "extra info",
+            "assignment info",
+            "get meta",
+            "loadsub"
+          ],
+          "description": "Options for device query. Example: [\"extra info\",\"assignment info\",\"get meta\",\"loadsub\"]. Leave empty for default options."
         },
         {
           "name": "include_policies",
-          "title": "Include Firewall Policies",
+          "title": "Include Policies",
           "type": "checkbox",
           "editable": true,
           "visible": true,
           "required": false,
           "value": true,
-          "description": "Include firewall policy configuration"
+          "description": "Include firewall policies in the output. Default is true."
         },
         {
           "name": "include_policy_stats",
-          "title": "Include Policy Statistics",
+          "title": "Include Policy Stats",
           "type": "checkbox",
           "editable": true,
           "visible": true,
           "required": false,
           "value": true,
-          "description": "Include firewall policy statistics (hit count, bytes, packets, etc.)"
+          "description": "Include firewall policy statistics in the output. Default is true."
         },
         {
           "name": "merge_stats",
@@ -483,7 +545,7 @@
           "visible": true,
           "required": false,
           "value": true,
-          "description": "Merge policy statistics into policy data for unified view"
+          "description": "Merge policy statistics with policy data. Default is true."
         },
         {
           "name": "policy_fields",
@@ -492,39 +554,30 @@
           "editable": true,
           "visible": true,
           "required": false,
-          "placeholder": [
+          "value": [
             "policyid",
             "name",
-            "status",
-            "action",
             "srcintf",
             "dstintf",
-            "srcaddr",
-            "dstaddr",
-            "schedule",
-            "service",
-            "logtraffic",
-            "nat",
-            "comments"
+            "action"
           ],
-          "description": "Specific policy fields to retrieve. Leave empty for default fields."
+          "description": "List of policy fields to retrieve. Example: [\"policyid\",\"name\",\"srcintf\",\"dstintf\",\"action\"]. Leave empty for default fields."
         },
         {
           "name": "stat_fields",
-          "title": "Statistics Fields",
+          "title": "Stat Fields",
           "type": "json",
           "editable": true,
           "visible": true,
           "required": false,
-          "placeholder": [
+          "value": [
             "policyid",
             "bytes",
             "packets",
-            "last_used",
-            "first_used",
-            "hit_count"
+            "hit_count",
+            "last_used"
           ],
-          "description": "Specific statistics fields to retrieve. Leave empty for default fields."
+          "description": "List of stat fields to retrieve. Example: [\"policyid\",\"bytes\",\"packets\",\"hit_count\",\"last_used\"]. Leave empty for default fields."
         }
       ],
       "output_schema": {
@@ -533,35 +586,21 @@
           {
             "target": "",
             "status": "",
-            "device_details": {
-              "serial": "",
+            "errors": [],
+            "device_info": {
+              "oid": "",
+              "name": "",
               "hostname": "",
-              "version": "",
-              "uptime": "",
-              "model": "",
-              "operation_mode": ""
+              "platform_str": "",
+              "os_ver": "",
+              "ip": "",
+              "sn": "",
+              "vdom": [],
+              "extra info": {},
+              "meta fields": {}
             },
-            "ha_status": {
-              "ha_enabled": "",
-              "ha_peers": []
-            },
-            "policies": [
-              {
-                "policyid": "",
-                "name": "",
-                "status": "",
-                "action": "",
-                "statistics": {
-                  "bytes": "",
-                  "packets": "",
-                  "hit_count": "",
-                  "first_used": "",
-                  "last_used": ""
-                }
-              }
-            ],
-            "policy_count": "",
-            "errors": []
+            "policies": [],
+            "policy_count": ""
           }
         ],
         "summary": {
@@ -570,6 +609,130 @@
           "devices_failed": ""
         }
       }
+    },
+    {
+      "operation": "json_rpc_gui",
+      "title": "JSON RPC GUI",
+      "annotation": "json_rpc_gui",
+      "description": "Execute GUI-based JSON RPC actions using the FortiManager flatui_proxy endpoint. Requires Username/Password authentication.",
+      "category": "investigation",
+      "is_config_required": true,
+      "visible": true,
+      "enabled": true,
+      "parameters": [
+        {
+          "name": "gui_method",
+          "title": "GUI Method",
+          "type": "select",
+          "editable": true,
+          "visible": true,
+          "required": true,
+          "description": "The GUI method to execute",
+          "options": [
+            "get",
+            "add",
+            "update",
+            "set",
+            "delete",
+            "replace",
+            "clone",
+            "exec",
+            "move"
+          ],
+          "value": "get"
+        },
+        {
+          "name": "url",
+          "title": "URL",
+          "type": "text",
+          "editable": true,
+          "visible": true,
+          "required": true,
+          "placeholder": "/gui/sys/uptime",
+          "description": "The GUI endpoint URL (e.g., /gui/sys/uptime)"
+        },
+        {
+          "name": "data",
+          "title": "Data",
+          "type": "json",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "placeholder": {},
+          "description": "Optional parameters to send with the request"
+        }
+      ],
+      "output_schema": {}
+    },
+    {
+      "operation": "get_device_vulnerabilities",
+      "title": "Get Device Vulnerabilities",
+      "annotation": "get_device_vulnerabilities",
+      "description": "Retrieve PSIRT vulnerability information for devices in an ADOM with optional filtering",
+      "category": "investigation",
+      "is_config_required": true,
+      "visible": true,
+      "enabled": true,
+      "parameters": [
+        {
+          "name": "adom_oid",
+          "title": "ADOM OID",
+          "type": "integer",
+          "editable": true,
+          "visible": true,
+          "required": true,
+          "placeholder": "223",
+          "description": "The ADOM ID (OID) to retrieve vulnerabilities for"
+        },
+        {
+          "name": "fortios_only",
+          "title": "FortiOS Only",
+          "type": "checkbox",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": false,
+          "description": "Return only FortiOS vulnerability information (excludes FortiProxy, FortiSASE, etc.)"
+        },
+        {
+          "name": "simplify",
+          "title": "Simplify Response",
+          "type": "checkbox",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": false,
+          "description": "Return simplified vulnerability data (IR number, CVE, title, severity, CVSS score, description, products)"
+        },
+        {
+          "name": "exclude_impacted_versions",
+          "title": "Exclude Impacted Versions",
+          "type": "checkbox",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": false,
+          "description": "Exclude the impacted version list (when unchecked, converts to simple version strings like [\u00277.6.0\u0027, \u00277.4.7\u0027])"
+        },
+        {
+          "name": "severity_filter",
+          "title": "Severity Filter",
+          "type": "select",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "description": "Filter vulnerabilities by severity level",
+          "options": [
+            "",
+            "Critical",
+            "High",
+            "Medium",
+            "Low"
+          ],
+          "value": ""
+        }
+      ],
+      "output_schema": {}
     }
   ]
 }
