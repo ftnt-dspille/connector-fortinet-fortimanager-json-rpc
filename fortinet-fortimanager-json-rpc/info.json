@@ -564,6 +564,16 @@
           "description": "List of policy fields to retrieve. Example: [\"policyid\",\"name\",\"srcintf\",\"dstintf\",\"action\"]. Leave empty for default fields."
         },
         {
+          "name": "include_policy_target",
+          "title": "Include Policy Target",
+          "type": "checkbox",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": true,
+          "description": "Include firewall policy target in the Policy output. Default is true."
+        },
+        {
           "name": "stat_fields",
           "title": "Stat Fields",
           "type": "json",

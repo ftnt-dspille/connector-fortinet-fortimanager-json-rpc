@@ -35,6 +35,7 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
             "policy_fields": Optional list of policy fields to retrieve
             "stat_fields": Optional list of stat fields to retrieve
             "merge_stats": Merge policy stats with policy data (default: True)
+            "include_target": Include device target inside policy (default: True)
         }
 
     Returns:
@@ -47,6 +48,7 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
         include_policies = params.get("include_policies", True)
         include_policy_stats = params.get("include_policy_stats", True)
         merge_stats = params.get("merge_stats", True)
+        include_target = params.get("include_policy_target", True)
 
         # Default device query parameters
         default_device_fields = [
@@ -196,7 +198,7 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
 
                 # Merge stats with policies if requested
                 if merge_stats and include_policies and include_policy_stats and policies and stats:
-                    merged_policies = _merge_policies_and_stats(policies, stats)
+                    merged_policies = _merge_policies_and_stats(policies, stats, include_target, device_target )
                     device_data["policies"] = merged_policies
 
                 device_data["status"] = "success"
@@ -377,7 +379,7 @@ def _clean_policy_data(policy: dict) -> dict:
     return cleaned
 
 
-def _merge_policies_and_stats(policies: List[dict], stats: List[dict]) -> List[dict]:
+def _merge_policies_and_stats(policies: List[dict], stats: List[dict], include_target: bool, device_target: str) -> List[dict]:
     """
     Merge firewall policy statistics with policy data based on policyid
 
@@ -420,6 +422,8 @@ def _merge_policies_and_stats(policies: List[dict], stats: List[dict]) -> List[d
                 "first_used": None,
                 "last_used": None
             }
+        if include_target:
+            merged_policy["device_target"] = device_target
 
         merged_policies.append(merged_policy)
 
