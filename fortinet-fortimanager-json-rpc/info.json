@@ -588,6 +588,16 @@
             "last_used"
           ],
           "description": "List of stat fields to retrieve. Example: [\"policyid\",\"bytes\",\"packets\",\"hit_count\",\"last_used\"]. Leave empty for default fields."
+        },
+        {
+          "name": "additional_calls",
+          "title": "Additional Calls",
+          "type": "json",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": [],
+          "description": "Optional list of custom sys/proxy/json calls to query for each target. Each call should be a dict: {\"url\": \"...\", \"return_key\": \"...\", \"action\": \"...\", \"data\": {...}}. Example: [{\"url\": \"/api/v2/monitor/system/resource/usage\", \"return_key\": \"resource_usage\"}]"
         }
       ],
       "output_schema": {

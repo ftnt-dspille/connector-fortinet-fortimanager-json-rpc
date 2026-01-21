@@ -36,6 +36,8 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
             "stat_fields": Optional list of stat fields to retrieve
             "merge_stats": Merge policy stats with policy data (default: True)
             "include_target": Include device target inside policy (default: True)
+            "additional_calls": Optional list of custom sys/proxy/json calls to query for each target.
+                                Each call should be a dict: {"url": "...", "return_key": "...", "action": "...", "data": {...}}
         }
 
     Returns:
@@ -134,6 +136,17 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
         if not stat_fields:
             stat_fields = default_stat_fields
 
+        # Additional calls processing
+        additional_calls = params.get("additional_calls", [])
+        if isinstance(additional_calls, str) and additional_calls.strip():
+            try:
+                additional_calls = json.loads(additional_calls)
+            except Exception as e:
+                raise ConnectorError(f"additional_calls must be a list of JSON objects: {str(e)}")
+
+        if not isinstance(additional_calls, list):
+            additional_calls = []
+
         # Query devices from /dvmdb/device
         devices_data = _get_devices_from_dvmdb(config, adom, device_fields, device_options, device_filter)
 
@@ -173,6 +186,11 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
         if include_policy_stats:
             stats_map = _get_firewall_stats_batch(config, device_targets, vdom, stat_fields)
 
+        # Execute additional calls if provided
+        additional_results_map = {}
+        if additional_calls:
+            additional_results_map = _get_additional_calls_batch(config, device_targets, additional_calls)
+
         # Process each device with batched data
         for idx, device_info in enumerate(devices_data):
             device_target = device_targets[idx]
@@ -200,6 +218,11 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
                 if merge_stats and include_policies and include_policy_stats and policies and stats:
                     merged_policies = _merge_policies_and_stats(policies, stats, include_target, device_target )
                     device_data["policies"] = merged_policies
+
+                # Add additional call results
+                if device_target in additional_results_map:
+                    for key, value in additional_results_map[device_target].items():
+                        device_data[key] = value
 
                 device_data["status"] = "success"
                 result["summary"]["devices_processed"] += 1
@@ -360,6 +383,120 @@ def _get_firewall_stats_batch(config: dict, device_targets: List[str], vdom: str
         logger.warning("Continuing without policy statistics")
 
     return stats_map
+
+
+def _get_additional_calls_batch(config: dict, device_targets: List[str], additional_calls: List[dict]) -> dict:
+    """Execute additional custom calls for multiple devices in batch"""
+    results_map = {}
+    # Initialize map for each device
+    for target in device_targets:
+        results_map[target] = {}
+
+    try:
+        batch_requests = []
+        for call in additional_calls:
+            url = call.get("url")
+            return_key = call.get("return_key")
+            action = call.get("action", "get")
+            payload_data = call.get("data", {})
+
+            if not url or not return_key:
+                logger.warning(f"Skipping additional call due to missing url or return_key: {call}")
+                continue
+
+            # Check if it is a proxy call
+            if url.startswith("/api/v2/"):
+                # Wrap in sys/proxy/json
+                request_payload = {
+                    "url": "/sys/proxy/json",
+                    "data": {
+                        "action": action,
+                        "target": device_targets,
+                        "resource": url
+                    }
+                }
+                # Also include any extra data if provided (though sys/proxy/json has specific format)
+                if payload_data:
+                    request_payload["data"].update(payload_data)
+            else:
+                # Direct FMG call for each target (if url contains target placeholder or similar)
+                # But the requirement says "queried for each of the targets".
+                # If it's a direct FMG call like /dvmdb/device/..., it might already include the target.
+                # For now, let's assume if it's not a proxy call, we might still want to target it.
+                # However, FMG's sys/proxy/json is the most common way to target a device.
+                # If they want a direct FMG call per device, we need to know how to parameterize it.
+                
+                # Assuming standard proxy-like behavior if they want it "per target"
+                request_payload = {
+                    "url": url,
+                    "data": {
+                        "target": device_targets
+                    }
+                }
+                if payload_data:
+                    request_payload["data"].update(payload_data)
+
+            batch_requests.append({
+                "method": "exec" if action == "execute" else "get", # Simplified mapping
+                "payload": request_payload,
+                "return_key": return_key,
+                "is_proxy": url.startswith("/api/v2/")
+            })
+
+        # Execute each batch request
+        # Note: We could potentially bundle these even more if they use the same method, 
+        # but for simplicity and because each call has its own return_key, we'll do them one by one.
+        # But wait, perform_rpc_action with free_form can take a list of data.
+        
+        free_form_data = [req["payload"] for req in batch_requests]
+        
+        if not free_form_data:
+            return results_map
+
+        response = perform_rpc_action("free_form", config, {
+            "method": "exec",
+            "data": free_form_data
+        })
+
+        if response.get("status") == 200 and response.get("free_form_response"):
+            # free_form_response is a list of responses, one for each item in free_form_data
+            for idx, resp_item in enumerate(response["free_form_response"]):
+                req_info = batch_requests[idx]
+                return_key = req_info["return_key"]
+                
+                # Process the data list which contains results for each target
+                resp_data = resp_item.get("data")
+                if isinstance(resp_data, list):
+                    for target_result in resp_data:
+                        target_name = target_result.get("target")
+                        if not target_name:
+                            continue
+                        
+                        device_target = f"/device/{target_name}" if "/" not in target_name else target_name
+                        
+                        if device_target in results_map:
+                            if target_result.get("status", {}).get("code") == 0:
+                                results_map[device_target][return_key] = target_result.get("response")
+                            else:
+                                results_map[device_target][f"{return_key}_error"] = target_result.get("status")
+                elif isinstance(resp_data, dict):
+                    # Single target response
+                    target_name = resp_data.get("target")
+                    if target_name:
+                        device_target = f"/device/{target_name}" if "/" not in target_name else target_name
+                        if device_target in results_map:
+                            if resp_data.get("status", {}).get("code") == 0:
+                                results_map[device_target][return_key] = resp_data.get("response")
+                            else:
+                                results_map[device_target][f"{return_key}_error"] = resp_data.get("status")
+                else:
+                    # Not a multi-target response or failed
+                    logger.warning(f"Additional call for {return_key} did not return expected data format: {resp_item}")
+
+    except Exception as e:
+        logger.error(f"Error executing additional calls in batch: {str(e)}")
+
+    return results_map
 
 
 def _clean_policy_data(policy: dict) -> dict:
