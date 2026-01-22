@@ -1,6 +1,6 @@
 {
   "name": "fortinet-fortimanager-json-rpc",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "label": "Fortinet FortiManager JSON RPC",
   "description": "The Fortinet FortiManager JSON RPC Connector is an advanced connector with freeform actions to use the JSON-RPC API directly. This connector puts the onus on the user to understand the FortiManager API. To use the connector that simplify actions please see the original Fortinet FortiManager Connector.",
   "publisher": "Fortinet CSE",
@@ -437,12 +437,17 @@
       "operation": "get_fortimanager_device_stats",
       "title": "Get FortiManager Device Stats",
       "annotation": "get_fortimanager_device_stats",
-      "description": "Gather comprehensive FortiManager device statistics including device details from /dvmdb/device, firewall policies, and policy statistics with batch processing",
+      "description": "Gather comprehensive FortiManager device statistics including device details, firewall policies, policy statistics, and optional resource usage (CPU/Memory)",
       "category": "investigation",
       "is_config_required": true,
       "visible": true,
       "enabled": true,
       "parameters": [
+        {
+          "type": "label",
+          "label": "Basic Settings",
+          "visible": true
+        },
         {
           "name": "adom",
           "title": "ADOM",
@@ -450,8 +455,9 @@
           "editable": true,
           "visible": true,
           "required": false,
-          "value": "root",
-          "description": "ADOM to query devices from. Default is \u0027root\u0027."
+          "placeholder": "root",
+          "description": "ADOM to query. Leave empty to query all ADOMs.",
+          "class": "group-element"
         },
         {
           "name": "vdom",
@@ -461,7 +467,13 @@
           "visible": true,
           "required": false,
           "value": "root",
-          "description": "VDOM to query on devices. Default is \u0027root\u0027."
+          "description": "VDOM to query for policies. Default is \u0027root\u0027.",
+          "class": "group-element last"
+        },
+        {
+          "type": "label",
+          "label": "Device Query Options",
+          "visible": true
         },
         {
           "name": "device_filter",
@@ -483,7 +495,8 @@
               "up"
             ]
           ],
-          "description": "Filter criteria for devices. Example: [[\"os_type\",\"\u003d\u003d\",\"fos\"],\"\u0026\u0026\",[\"conn_status\",\"\u003d\u003d\",\"up\"]]. Leave empty for default filter (FortiGate devices that are up)."
+          "description": "Filter criteria for devices. Example: [[\"os_type\",\"\u003d\u003d\",\"fos\"],\"\u0026\u0026\",[\"conn_status\",\"\u003d\u003d\",\"up\"]]",
+          "class": "group-element"
         },
         {
           "name": "device_fields",
@@ -497,10 +510,10 @@
             "hostname",
             "platform_str",
             "os_ver",
-            "ip",
-            "sn"
+            "conn_status",
+            "ip"
           ],
-          "description": "List of device fields to retrieve from /dvmdb/device. Example: [\"name\",\"hostname\",\"platform_str\",\"os_ver\",\"ip\",\"sn\"]. Leave empty for default fields."
+          "description": "List of device fields to retrieve. Leave empty for default fields."
         },
         {
           "name": "device_options",
@@ -511,11 +524,15 @@
           "required": false,
           "value": [
             "extra info",
-            "assignment info",
-            "get meta",
-            "loadsub"
+            "assignment info"
           ],
-          "description": "Options for device query. Example: [\"extra info\",\"assignment info\",\"get meta\",\"loadsub\"]. Leave empty for default options."
+          "description": "List of device options. Example: [\"extra info\",\"assignment info\",\"get meta\",\"loadsub\"]",
+          "class": "group-element last"
+        },
+        {
+          "type": "label",
+          "label": "Firewall Policy Options",
+          "visible": true
         },
         {
           "name": "include_policies",
@@ -525,7 +542,8 @@
           "visible": true,
           "required": false,
           "value": true,
-          "description": "Include firewall policies in the output. Default is true."
+          "description": "Include firewall policies in the output. Default is true.",
+          "class": "group-element"
         },
         {
           "name": "include_policy_stats",
@@ -548,6 +566,16 @@
           "description": "Merge policy statistics with policy data. Default is true."
         },
         {
+          "name": "include_policy_target",
+          "title": "Include Policy Target",
+          "type": "checkbox",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": true,
+          "description": "Include firewall policy target in the Policy output. Default is true."
+        },
+        {
           "name": "policy_fields",
           "title": "Policy Fields",
           "type": "json",
@@ -564,16 +592,6 @@
           "description": "List of policy fields to retrieve. Example: [\"policyid\",\"name\",\"srcintf\",\"dstintf\",\"action\"]. Leave empty for default fields."
         },
         {
-          "name": "include_policy_target",
-          "title": "Include Policy Target",
-          "type": "checkbox",
-          "editable": true,
-          "visible": true,
-          "required": false,
-          "value": true,
-          "description": "Include firewall policy target in the Policy output. Default is true."
-        },
-        {
           "name": "stat_fields",
           "title": "Stat Fields",
           "type": "json",
@@ -587,7 +605,96 @@
             "hit_count",
             "last_used"
           ],
-          "description": "List of stat fields to retrieve. Example: [\"policyid\",\"bytes\",\"packets\",\"hit_count\",\"last_used\"]. Leave empty for default fields."
+          "description": "List of stat fields to retrieve. Example: [\"policyid\",\"bytes\",\"packets\",\"hit_count\",\"last_used\"]. Leave empty for default fields.",
+          "class": "group-element last"
+        },
+        {
+          "type": "label",
+          "label": "Resource Usage Options",
+          "visible": true
+        },
+        {
+          "name": "include_resource_usage",
+          "title": "Include Resource Usage",
+          "type": "checkbox",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": false,
+          "description": "Include system resource usage (CPU/Memory) data. Default is false.",
+          "class": "group-element"
+        },
+        {
+          "name": "resource_summary_mode",
+          "title": "Resource Summary Mode",
+          "type": "select",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "description": "How to summarize resource data",
+          "options": [
+            "current_only",
+            "summary_only",
+            "full"
+          ],
+          "value": "summary_only"
+        },
+        {
+          "name": "resource_metrics",
+          "title": "Resource Metrics",
+          "type": "multiselect",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "options": [
+            "CPU",
+            "Memory",
+            "Disk",
+            "Session",
+            "Session6",
+            "Setup Rate",
+            "Setup Rate6",
+            "NPU Session",
+            "NPU Session6",
+            "NTurbo Session",
+            "NTurbo Session6",
+            "Disk Log Rate",
+            "FAZ Log Rate",
+            "FortiCloud Log Rate",
+            "FAZ Cloud Log Rate"
+          ],
+          "value": [
+            "CPU",
+            "Memory"
+          ],
+          "description": "List of metrics to include"
+        },
+        {
+          "name": "resource_time_windows",
+          "title": "Resource Time Windows",
+          "type": "multiselect",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "options": [
+            "1 Minute",
+            "10 Minutes",
+            "30 Minutes",
+            "1 Hour",
+            "12 Hours",
+            "24 Hours"
+          ],
+          "value": [
+            "1 Hour",
+            "24 Hours"
+          ],
+          "description": "List of time windows to include",
+          "class": "group-element last"
+        },
+        {
+          "type": "label",
+          "label": "Advanced Options",
+          "visible": true
         },
         {
           "name": "additional_calls",
@@ -596,8 +703,14 @@
           "editable": true,
           "visible": true,
           "required": false,
-          "value": [],
-          "description": "Optional list of custom sys/proxy/json calls to query for each target. Each call should be a dict: {\"url\": \"...\", \"return_key\": \"...\", \"action\": \"...\", \"data\": {...}}. Example: [{\"url\": \"/api/v2/monitor/system/resource/usage\", \"return_key\": \"resource_usage\"}]"
+          "value": [
+            {
+              "url": "/api/v2/monitor/system/resource/usage",
+              "return_key": "resource_usage"
+            }
+          ],
+          "description": "Optional list of custom sys/proxy/json calls to query for each target. Each call should be a dict: {\"url\": \"...\", \"return_key\": \"...\", \"action\": \"...\", \"data\": {...}}. Example: [{\"url\": \"/api/v2/monitor/system/resource/usage\", \"return_key\": \"resource_usage\"}]",
+          "class": "group-element last"
         }
       ],
       "output_schema": {
