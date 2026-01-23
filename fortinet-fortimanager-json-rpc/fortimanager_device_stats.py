@@ -10,7 +10,7 @@ from typing import List, Optional
 
 from connectors.core.connector import ConnectorError, get_logger
 
-from .generic_json_rpc import perform_rpc_action
+from .generic_json_rpc import perform_rpc_action  # ty:ignore[unresolved-import]
 
 logger = get_logger("fortinet-fortimanager-json-rpc")
 
@@ -56,6 +56,7 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
         include_policy_stats = params.get("include_policy_stats", True)
         merge_stats = params.get("merge_stats", True)
         include_target = params.get("include_policy_target", True)
+        include_uptime = params.get("include_uptime", False)
 
         # Default device query parameters
         default_device_fields = [
@@ -257,6 +258,15 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
             }
             additional_calls.append(resource_call)
 
+        # Add system uptime call if requested
+        if include_uptime:
+            uptime_call = {
+                "url": "/api/v2/monitor/web-ui/state",
+                "return_key": "system_uptime",
+                "action": "get",
+            }
+            additional_calls.append(uptime_call)
+
         # Query devices from /dvmdb/device
         devices_data = _get_devices_from_dvmdb(
             config, adom, device_fields, device_options, device_filter
@@ -357,6 +367,14 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
                                 time_windows=resource_time_windows,
                             )
                             device_data[key] = summarized
+                        elif key == "system_uptime":
+                            try:
+                                device_data[key] = _summarize_system_uptime(value)
+                            except Exception as e:
+                                logger.error(
+                                    f"Error processing system uptime for {device_target}: {str(e)}"
+                                )
+                                device_data[f"{key}_error"] = str(e)
                         else:
                             device_data[key] = value
 
@@ -370,7 +388,7 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
                 result["summary"]["devices_failed"] += 1
 
             result["devices"].append(device_data)
-        print(json.dumps(result, indent=2))
+        # print(json.dumps(result, indent=2))
         return result
 
     except Exception as e:
@@ -740,8 +758,8 @@ def _merge_policies_and_stats(
 def _summarize_resource_usage(
     resource_data: dict,
     mode: str = "summary_only",
-    metrics: List[str] = None,
-    time_windows: List[str] = None,
+    metrics: List[str] = [],
+    time_windows: List[str] = [],
 ) -> dict:
     """
     Summarize verbose resource usage data from /api/v2/monitor/system/resource/usage
@@ -758,9 +776,9 @@ def _summarize_resource_usage(
     Returns:
         Summarized resource data
     """
-    if metrics is None:
+    if not metrics:
         metrics = ["cpu", "mem"]
-    if time_windows is None:
+    if not time_windows:
         time_windows = ["1-hour", "24-hour"]
 
     # Validate mode
@@ -809,6 +827,37 @@ def _summarize_resource_usage(
             summarized[metric] = metric_data
 
     return summarized
+
+
+def _summarize_system_uptime(value: dict) -> dict:
+    """
+    Normalize snapshot/reboot epoch (ms or s) to seconds and compute uptime.
+    Returns a dict suitable to store in device_data["system_uptime"].
+    """
+    results = (value or {}).get("results", {}) if isinstance(value, dict) else {}
+    snapshot_time_raw = results.get("snapshot_utc_time")
+    last_reboot_raw = results.get("utc_last_reboot")
+
+    snapshot_time = milli_epoch_to_seconds(snapshot_time_raw)
+    last_reboot = milli_epoch_to_seconds(last_reboot_raw)
+
+    if not snapshot_time or not last_reboot:
+        return value  # preserve original structure if missing data
+
+    uptime_seconds = snapshot_time - last_reboot
+
+    return {
+        "snapshot_utc_time": snapshot_time,
+        "utc_last_reboot": last_reboot,
+        "uptime_seconds": uptime_seconds,
+        "uptime_human": (
+            f"{uptime_seconds // 86400}d "
+            f"{(uptime_seconds % 86400) // 3600}h "
+            f"{(uptime_seconds % 3600) // 60}m "
+            f"{uptime_seconds % 60}s"
+        ),
+        "epoch_unit": "seconds",
+    }
 
 
 def _summarize_metric_item(
@@ -863,3 +912,10 @@ def _summarize_metric_item(
             summary["historical"][window] = window_data
 
     return summary
+
+
+def milli_epoch_to_seconds(ts: int | float | None) -> int | None:
+    if ts is None:
+        return None
+    ts = int(ts)
+    return ts // 1000 if ts > 1_000_000_000_000 else ts

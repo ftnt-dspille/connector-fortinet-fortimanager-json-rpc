@@ -576,6 +576,16 @@
           "description": "Include firewall policy target in the Policy output. Default is true."
         },
         {
+          "name": "include_uptime",
+          "title": "Include Uptime",
+          "type": "checkbox",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "value": true,
+          "description": "Include FortiManager system uptime in the output. Default is false."
+        },
+        {
           "name": "policy_fields",
           "title": "Policy Fields",
           "type": "json",
@@ -620,7 +630,7 @@
           "editable": true,
           "visible": true,
           "required": false,
-          "value": false,
+          "value": true,
           "description": "Include system resource usage (CPU/Memory) data. Default is false.",
           "class": "group-element"
         },
@@ -705,8 +715,8 @@
           "required": false,
           "value": [
             {
-              "url": "/api/v2/monitor/system/resource/usage",
-              "return_key": "resource_usage"
+              "url": "/api/v2/monitor/system/ha-history",
+              "return_key": "ha_history"
             }
           ],
           "description": "Optional list of custom sys/proxy/json calls to query for each target. Each call should be a dict: {\"url\": \"...\", \"return_key\": \"...\", \"action\": \"...\", \"data\": {...}}. Example: [{\"url\": \"/api/v2/monitor/system/resource/usage\", \"return_key\": \"resource_usage\"}]",
