@@ -5,14 +5,18 @@ Copyright (c) 2024 Fortinet Inc
 Copyright end
 """
 
-from connectors.core.connector import get_logger, ConnectorError
-from .generic_json_rpc import perform_rpc_action
-from .fortimanager_device_stats import get_fortimanager_device_stats
-from .gui_json_rpc import perform_gui_action, get_device_vulnerabilities as gui_get_vulnerabilities
+from connectors.core.connector import ConnectorError, get_logger
+
+from .fortimanager_device_stats import get_fortimanager_device_stats  # ty:ignore[unresolved-import]
+from .generic_json_rpc import perform_rpc_action  # ty:ignore[unresolved-import]
+from .gui_json_rpc import get_device_vulnerabilities as gui_get_vulnerabilities  # ty:ignore[unresolved-import]
+from .gui_json_rpc import perform_gui_action  # ty:ignore[unresolved-import]
+from .policies import _get_package_policies  # ty:ignore[unresolved-import]
+
 logger = get_logger('fortinet-fortimanager-json-rpc')
 
 
-def _check_health(config: dict) -> bool:
+def _check_health(config: dict) -> bool | None:
     params = {"url": "/sys/status", "data": {}}
     try:
         response = perform_rpc_action("get", config, params)
@@ -75,6 +79,13 @@ def json_rpc_freeform(config: dict, params: dict) -> dict:
     except Exception as e:
         raise ConnectorError(str(e))
 
+def get_package_policies(config, params):
+    try:
+        response = _get_package_policies(config, params)
+        return response
+    except Exception as e:
+        raise ConnectorError(str(e))
+
 
 def json_rpc_gui(config: dict, params: dict) -> dict:
     """
@@ -105,6 +116,7 @@ operations = {
     'json_rpc_execute': json_rpc_execute,
     'json_rpc_delete': json_rpc_delete,
     'json_rpc_freeform': json_rpc_freeform,
+    'get_package_policies': get_package_policies,
     'get_fortimanager_device_stats': get_fortimanager_device_stats,
     'json_rpc_gui': json_rpc_gui,
     'get_device_vulnerabilities': get_device_vulnerabilities,
