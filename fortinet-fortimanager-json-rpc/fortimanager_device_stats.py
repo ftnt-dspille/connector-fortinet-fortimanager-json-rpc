@@ -6,7 +6,7 @@ Copyright end
 """
 
 import json
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, TypedDict, Union
 
 from connectors.core.connector import ConnectorError, get_logger
 
@@ -15,7 +15,20 @@ from .generic_json_rpc import perform_rpc_action  # ty:ignore[unresolved-import]
 logger = get_logger("fortinet-fortimanager-json-rpc")
 
 
-def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
+class Summary(TypedDict):
+    total_devices: int
+    devices_processed: int
+    devices_failed: int
+
+
+class DeviceStatsResult(TypedDict, total=False):
+    status: int
+    devices: List[Dict[str, Any]]
+    summary: Summary
+    message: str
+
+
+def get_fortimanager_device_stats(config: dict, params: dict) -> DeviceStatsResult:
     """
     Gather comprehensive FortiManager device statistics including:
     - Device details from /dvmdb/device
@@ -95,7 +108,9 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
                 else:
                     device_fields = default_device_fields
             except Exception as e:
-                raise ConnectorError("device_fields must be a list of field names")
+                raise ConnectorError(
+                    "device_fields must be a list of field names"
+                ) from e
         if not device_fields:
             device_fields = default_device_fields
 
@@ -108,7 +123,9 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
                 else:
                     device_options = default_device_options
             except Exception as e:
-                raise ConnectorError("device_options must be a list of option names")
+                raise ConnectorError(
+                    "device_options must be a list of option names"
+                ) from e
         if not device_options:
             device_options = default_device_options
 
@@ -123,7 +140,7 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
             except Exception as e:
                 raise ConnectorError(
                     "device_filter must be a list representing filter criteria"
-                )
+                ) from e
         if not device_filter:
             device_filter = default_device_filter
 
@@ -163,7 +180,9 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
                 else:
                     policy_fields = default_policy_fields
             except Exception as e:
-                raise ConnectorError("policy_fields must be a list of policy fields")
+                raise ConnectorError(
+                    "policy_fields must be a list of policy fields"
+                ) from e
         if not policy_fields:
             policy_fields = default_policy_fields
 
@@ -174,7 +193,7 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
                     stat_fields = json.loads(stat_fields)
                 else:
                     stat_fields = default_stat_fields
-            except Exception as e:
+            except Exception as _:
                 raise ConnectorError("stat_fields must be a list of stat_fields")
         if not stat_fields:
             stat_fields = default_stat_fields
@@ -288,7 +307,7 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
         device_targets = [f"/device/{device['name']}" for device in devices_data]
 
         # Initialize result structure
-        result = {
+        result: DeviceStatsResult = {
             "status": 200,
             "devices": [],
             "summary": {
@@ -322,7 +341,7 @@ def get_fortimanager_device_stats(config: dict, params: dict) -> dict:
         # Process each device with batched data
         for idx, device_info in enumerate(devices_data):
             device_target = device_targets[idx]
-            device_data = {
+            device_data: Dict[str, Any] = {
                 "target": device_target,
                 "status": "pending",
                 "errors": [],
@@ -566,7 +585,9 @@ def _get_additional_calls_batch(
             url = call.get("url")
             return_key = call.get("return_key")
             action = call.get("action", "get")
-            payload_data = call.get("data", {})
+            payload_data = call.get("data") or {}
+            if not isinstance(payload_data, dict):
+                payload_data = {}
 
             if not url or not return_key:
                 logger.warning(
@@ -577,7 +598,7 @@ def _get_additional_calls_batch(
             # Check if it is a proxy call
             if url.startswith("/api/v2/"):
                 # Wrap in sys/proxy/json
-                request_payload = {
+                request_payload: Dict[str, Any] = {
                     "url": "/sys/proxy/json",
                     "data": {
                         "action": action,
@@ -758,8 +779,8 @@ def _merge_policies_and_stats(
 def _summarize_resource_usage(
     resource_data: dict,
     mode: str = "summary_only",
-    metrics: List[str] = [],
-    time_windows: List[str] = [],
+    metrics: Optional[List[str]] = None,
+    time_windows: Optional[List[str]] = None,
 ) -> dict:
     """
     Summarize verbose resource usage data from /api/v2/monitor/system/resource/usage
@@ -914,7 +935,7 @@ def _summarize_metric_item(
     return summary
 
 
-def milli_epoch_to_seconds(ts: int | float | None) -> int | None:
+def milli_epoch_to_seconds(ts: Union[int, float, None]) -> Optional[int]:
     if ts is None:
         return None
     ts = int(ts)
