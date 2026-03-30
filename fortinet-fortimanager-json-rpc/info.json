@@ -1,6 +1,6 @@
 {
   "name": "fortinet-fortimanager-json-rpc",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "label": "Fortinet FortiManager JSON RPC",
   "description": "The Fortinet FortiManager JSON RPC Connector is an advanced connector with freeform actions to use the JSON-RPC API directly. This connector puts the onus on the user to understand the FortiManager API. To use the connector that simplify actions please see the original Fortinet FortiManager Connector.",
   "publisher": "Fortinet CSE",
@@ -429,6 +429,49 @@
             }
           ],
           "description": "Pass a json object for the data you want to send. "
+        }
+      ],
+      "output_schema": {}
+    },
+    {
+      "operation": "get_package_policies",
+      "title": "Get Package Policies",
+      "annotation": "get_package_policies",
+      "description": "This Action will get a specific package policies and will unpack all of the address members. ",
+      "category": "investigation",
+      "is_config_required": true,
+      "visible": true,
+      "enabled": true,
+      "parameters": [
+        {
+          "name": "adom",
+          "title": "Adom",
+          "type": "text",
+          "editable": true,
+          "visible": true,
+          "required": true,
+          "tooltip": "The adom the policy package lives in ",
+          "description": "The adom the policy package lives in "
+        },
+        {
+          "name": "policy_package",
+          "title": "Policy Package",
+          "type": "text",
+          "editable": true,
+          "visible": true,
+          "required": true,
+          "tooltip": "The name of the policy package",
+          "description": "The name of the policy package"
+        },
+        {
+          "name": "fields",
+          "title": "fields",
+          "type": "text",
+          "editable": true,
+          "visible": true,
+          "required": false,
+          "tooltip": "Comma seperated fields to return from the firewall policy. ",
+          "description": "Comma seperated fields to return from the firewall policy. "
         }
       ],
       "output_schema": {}

@@ -16,7 +16,7 @@ from .policies import _get_package_policies  # ty:ignore[unresolved-import]
 logger = get_logger('fortinet-fortimanager-json-rpc')
 
 
-def _check_health(config: dict) -> bool | None:
+def _check_health(config: dict) -> bool:
     params = {"url": "/sys/status", "data": {}}
     try:
         response = perform_rpc_action("get", config, params)

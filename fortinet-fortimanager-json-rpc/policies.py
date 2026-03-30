@@ -9,7 +9,6 @@ from json import JSONDecodeError
 from connectors.core.connector import get_logger
 
 # from .utils import create_fmg_session
-
 from .generic_json_rpc import perform_rpc_action  # ty:ignore[unresolved-import]
 
 logger = get_logger('fortinet-fortimanager-policy-management')
@@ -41,19 +40,19 @@ def _get_package_policies(config, params):
     if not fields:
         firewall_params.pop("fields")
 
-    status, policies = perform_rpc_action("get", config, firewall_params)
-    status, adom_addresses = perform_rpc_action(
+    policies = perform_rpc_action("get", config, firewall_params).get("get_response", {})
+    adom_addresses = perform_rpc_action(
         "get", config, {"url": f"/pm/config/adom/{adom}/obj/firewall/address"}
-    )
-    status, adom_address_groups = perform_rpc_action(
+    ).get("get_response", {})
+    adom_address_groups = perform_rpc_action(
         "get", config, {"url": f"/pm/config/adom/{adom}/obj/firewall/addrgrp"}
-    )
-    status, adom_services = perform_rpc_action(
+    ).get("get_response", {})
+    adom_services = perform_rpc_action(
         "get", config, {"url": f"/pm/config/adom/{adom}/obj/firewall/service/custom"}
-    )
-    status, adom_service_groups = perform_rpc_action(
+    ).get("get_response", {})
+    adom_service_groups = perform_rpc_action(
         "get", config, {"url": f"/pm/config/adom/{adom}/obj/firewall/service/group"}
-    )
+    ).get("get_response", {})
 
     adom_address_names = [address["name"] for address in adom_addresses]
     adom_group_names = [group["name"] for group in adom_address_groups]
