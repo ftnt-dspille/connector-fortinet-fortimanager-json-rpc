@@ -19,6 +19,16 @@ logger = get_logger('fortinet-fortimanager-json-rpc')
 # Set the maximum number of retries to acquire a lock on an ADOM
 MAX_RETRY_LIMIT = 1500
 
+# URLs that do not require workspace locking. These are exec actions that install
+# or push already-committed config to devices — they read from the ADOM config
+# but do not modify it, so locking the workspace is unnecessary and would block
+# other concurrent workers.
+NO_LOCK_URLS = frozenset({
+    "/securityconsole/install/device",
+    "/securityconsole/install/package",
+    "/securityconsole/install/preview",
+})
+
 
 def get_config(config: dict) -> tuple:
     auth_method = config.get("auth_method")
@@ -151,6 +161,79 @@ def lock_adom(fmg, adom, url, data):
     return False
 
 
+def parse_minimal_lock_scope(url: str) -> tuple:
+    """
+    Determine the minimal workspace lock scope from a URL.
+
+    Checks for policy package scope first (more specific), then device scope.
+    Returns (scope_type, scope_id) where scope_type is 'pkg' or 'dev',
+    or (None, None) to signal fallback to ADOM-level locking.
+
+    Note: for free_form actions, only the first request's URL is evaluated.
+    If the batch spans multiple packages or devices, the lock covers only
+    the first detected scope.
+    """
+    # Package scope: /pm/config/adom/{adom}/pkg/{pkg}/...
+    pkg_match = re.search(r'/pm/config/adom/[^/]+/pkg/([^/]+)', url)
+    if pkg_match:
+        return "pkg", pkg_match.group(1)
+
+    # Device scope: /dev/{dev} or /device/{dev}
+    dev_match = re.search(r'/(?:dev|device)/([^/]+)', url)
+    if dev_match:
+        return "dev", dev_match.group(1)
+
+    return None, None
+
+
+def lock_minimal_scope(fmg, adom: str, scope_type: str, scope_id: str, url: str, data) -> bool:
+    """
+    Acquire a workspace lock at package or device scope with the same retry
+    logic as lock_adom.
+    """
+    lock_url = f"/dvmdb/adom/{adom}/workspace/lock/{scope_type}/{scope_id}"
+    for attempt in range(MAX_RETRY_LIMIT):
+        status, _ = fmg.execute(url=lock_url)
+        if status == 0:
+            logger.debug(f"Acquired minimal lock for {scope_type}/{scope_id} in ADOM: {adom} (URL: {url}).")
+            return True
+        # -9 means the workspace command is invalid, i.e. workspace mode is not
+        # enabled on this ADOM — no lock required.
+        if status == -9:
+            logger.debug(f"Workspaces not enabled. Locking {scope_type}/{scope_id} not required.")
+            return True
+        # -6 means the URL is invalid — the ADOM, package, or device does not exist.
+        if status == -6:
+            logger.error(f"URL is invalid. {scope_type}/{scope_id} in ADOM: {adom} does not exist.")
+            return False
+        if attempt < MAX_RETRY_LIMIT - 1:
+            sleep_time = random.randint(1, 10)
+            logger.debug(
+                f"Failed to acquire minimal lock for {scope_type}/{scope_id} in ADOM: {adom}. "
+                f"Sleeping {sleep_time}s and retrying..."
+            )
+            time.sleep(sleep_time)
+        else:
+            logger.error(
+                f"Max retry limit reached. Could not acquire minimal lock for "
+                f"{scope_type}/{scope_id} in ADOM: {adom} (URL: {url})."
+            )
+            return False
+    return False
+
+
+def commit_minimal_scope(fmg, adom: str, scope_type: str, scope_id: str) -> None:
+    """Commit workspace changes at package or device scope."""
+    commit_url = f"/dvmdb/adom/{adom}/workspace/commit/{scope_type}/{scope_id}"
+    fmg.execute(url=commit_url)
+
+
+def unlock_minimal_scope(fmg, adom: str, scope_type: str, scope_id: str) -> None:
+    """Release a workspace lock at package or device scope."""
+    unlock_url = f"/dvmdb/adom/{adom}/workspace/unlock/{scope_type}/{scope_id}"
+    fmg.execute(url=unlock_url)
+
+
 def handle_special_cases(fmg, url, data, action_response, task_response=None):
     special_cases = {
         "/securityconsole/install/preview": {
@@ -186,27 +269,50 @@ def perform_rpc_action(action: str, config: dict, params: dict) -> dict:
             adom = parse_adom_from_input(url, data)
             response = {}
 
-            # Lock the ADOM if the action is not a get or execute and the lock context uses the workspace
-            if action not in ["get"] and fmg._lock_ctx.uses_workspace:
-                if not lock_adom(fmg, adom, url, data):
-                    raise ConnectorError(f"Failed to lock ADOM: {adom}")
+            # Determine whether a workspace lock is needed for this request.
+            # Read-only (get) actions and URLs in NO_LOCK_URLS never require a lock.
+            needs_lock = (
+                action not in ["get"]
+                and fmg._lock_ctx.uses_workspace
+                and url not in NO_LOCK_URLS
+            )
 
-                if action == "free_form":
-                    method = params.get("method")
-                    status, action_response = action_func(method, **data)
+            # Resolve the lock scope. With minimal_locking enabled the connector
+            # attempts to lock only the policy package or device referenced in the
+            # URL instead of the entire ADOM, reducing contention in environments
+            # with concurrent automation workers. Falls back to ADOM-level locking
+            # when no finer scope can be parsed, or when the ADOM is "global".
+            scope_type, scope_id = None, None
+            if needs_lock and config.get("minimal_locking", False) and adom != "global":
+                scope_type, scope_id = parse_minimal_lock_scope(url)
+
+            if needs_lock:
+                if scope_type is not None:
+                    if not lock_minimal_scope(fmg, adom, scope_type, scope_id, url, data):
+                        raise ConnectorError(
+                            f"Failed to acquire minimal lock for {scope_type}/{scope_id} in ADOM: {adom}"
+                        )
                 else:
-                    status, action_response = action_func(url=url, **data)
+                    if not lock_adom(fmg, adom, url, data):
+                        raise ConnectorError(f"Failed to lock ADOM: {adom}")
+
+            if action == "free_form":
+                method = params.get("method")
+                status, action_response = action_func(method, **data)
             else:
-                if action == "free_form":
-                    method = params.get("method")
-                    status, action_response = action_func(method, **data)
-                else:
-                    status, action_response = action_func(url=url, **data)
+                status, action_response = action_func(url=url, **data)
 
-            if fmg._lock_ctx.uses_workspace and action != "get":
-                fmg.commit_changes(adom)
-                # Consider unlocking the adom here, but not sure if it's safe to do so if there is a task to track
-                # Not unlocking here could potentially cause delays in other workers that need to lock the same adom
+            if needs_lock:
+                if scope_type is not None:
+                    commit_minimal_scope(fmg, adom, scope_type, scope_id)
+                    # Explicitly unlock pkg/dev scope locks — pyFMG's __exit__ only
+                    # auto-unlocks ADOMs registered via lock_adom(), not locks acquired
+                    # through execute(). Releasing early reduces contention for other workers.
+                    unlock_minimal_scope(fmg, adom, scope_type, scope_id)
+                else:
+                    fmg.commit_changes(adom)
+                    # Consider unlocking the adom here, but not sure if it's safe to do so if there is a task to track
+                    # Not unlocking here could potentially cause delays in other workers that need to lock the same adom
 
             response[f"{action}_response"] = action_response
             # If the action is execute and track_task is set to True, track the task
@@ -228,9 +334,13 @@ def perform_rpc_action(action: str, config: dict, params: dict) -> dict:
                         response["special_case_response"] = special_case_result
 
                 # I'm not sure if we need to commit changes here after the task is tracked, but leaving it here for now
-                if fmg._lock_ctx.uses_workspace:
-                    fmg.commit_changes(adom)
-                    fmg.unlock_adom(adom)
+                if needs_lock:
+                    if scope_type is not None:
+                        commit_minimal_scope(fmg, adom, scope_type, scope_id)
+                        unlock_minimal_scope(fmg, adom, scope_type, scope_id)
+                    else:
+                        fmg.commit_changes(adom)
+                        fmg.unlock_adom(adom)
 
             response["status"] = status
             logger.debug(response)

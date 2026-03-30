@@ -126,6 +126,18 @@
         "value": true,
         "description": "Setting this to true adds a verbose flag to the request, so that the integers are translated to the string representation by FortiManager.",
         "isOnChange": false
+      },
+      {
+        "name": "minimal_locking",
+        "title": "Minimal Locking (Beta)",
+        "type": "checkbox",
+        "editable": true,
+        "visible": true,
+        "required": false,
+        "value": false,
+        "tooltip": "Beta feature. When enabled, locks only the policy package or device referenced in the URL instead of the full ADOM. Reduces workspace lock contention in environments with concurrent automation workers. Falls back to ADOM-level locking when no package or device can be parsed from the URL. Verify behavior in a test environment before enabling in production.",
+        "description": "When enabled, reduces workspace lock contention by locking only the policy package or device referenced in the URL rather than the entire ADOM. This is a beta feature.",
+        "isOnChange": false
       }
     ]
   },
