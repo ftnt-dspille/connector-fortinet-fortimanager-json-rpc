@@ -96,8 +96,13 @@ class FortiManagerGUI:
 
     def logout(self):
         try:
-            logout_url = f"{self.base_url}/p/logout/"
-            self.session.get(logout_url, timeout=10)
+            logout_url = f"{self.base_url}/p/logout-api/"
+            headers = {
+                "Xsrf-Token": self.headers.get("HTTP_CSRF_TOKEN", ""),
+                "Referer": self.base_url,
+                "Content-Type": "application/json",
+            }
+            self.session.post(logout_url, headers=headers, timeout=10)
             logger.debug("GUI logout successful")
         except Exception as e:
             logger.warning(f"Logout exception: {str(e)}")
