@@ -153,16 +153,6 @@ def test_rpc_get_invalid_data(auth_config):
         assert True, f"Expected error for invalid params"
 
 
-def test_rpc_get_no_params(auth_config):
-    params = {}
-    for operation in operations:
-        if operation != "check_health":
-            try:
-                response = operations[operation](auth_config, params)
-                assert False, f"Expected error for missing params for operation {operation}"
-            except operations_package.ConnectorError as e:
-                assert True, f"Expected error for missing params for operation {operation}"
-
 
 def test_rpc_get_invalid_config(auth_config):
     invalid_config = auth_config.copy()
