@@ -846,8 +846,8 @@
           "editable": true,
           "visible": true,
           "required": true,
-          "placeholder": "/gui/sys/uptime",
-          "description": "The GUI endpoint URL (e.g., /gui/sys/uptime)"
+          "placeholder": "/gui/adoms",
+          "description": "The GUI endpoint URL routed by FortiManager's flatui_proxy (e.g., /gui/adoms, /gui/adoms/{adom_oid}/dvm/psirt). To find valid URLs, open the FortiManager web UI with browser DevTools and inspect the 'url' field of POST requests to /cgi-bin/module/flatui_proxy."
         },
         {
           "name": "data",
