@@ -19,15 +19,121 @@ logger = get_logger('fortinet-fortimanager-json-rpc')
 # Set the maximum number of retries to acquire a lock on an ADOM
 MAX_RETRY_LIMIT = 1500
 
-# URLs that do not require workspace locking. These are exec actions that install
-# or push already-committed config to devices -- they read from the ADOM config
-# but do not modify it, so locking the workspace is unnecessary and would block
-# other concurrent workers.
+# URLs that do not require workspace locking, so taking one would only block other
+# concurrent workers for nothing. Membership here is measured, not assumed: each URL
+# was run against a live appliance in workspace mode both with and without a lock, and
+# the queued task was followed to completion. See tests/live/lock_matrix_probe.py.
+#
+# These calls return status 0 and a task id whether or not the lock was needed; only
+# the finished task reports the failure. This list therefore cannot be verified by
+# reading RPC status codes alone.
+#
+# /securityconsole/install/package is deliberately NOT here. Installing a package
+# without the workspace lock produces a task that fails with "no write permission"
+# while the RPC still reports success, so it must take a lock like any other write.
+#
+# /securityconsole/install/device is deliberately NOT here either. It used to be, on
+# the strength of a measurement taken with nothing pending: with no staged device-DB
+# change both arms trivially "succeed". Re-measured 2/2 with a real pending change,
+# the unlocked arm copies and then fails the save ("Copy to device done",
+# "install and save finished status=FAILED") while a dev/<device> lock held across the
+# task finishes "install and save finished status=OK". A device lock is sufficient, so
+# under minimal locking this costs no ADOM serialisation.
 NO_LOCK_URLS = frozenset({
-    "/securityconsole/install/device",
-    "/securityconsole/install/package",
+    # Generates a preview only; verified identical locked and unlocked.
     "/securityconsole/install/preview",
+    # Proxies a REST call straight to the managed device and never touches an FMG
+    # database, so no workspace lock applies. Without this entry the connector cannot
+    # parse an ADOM from the URL or payload and falls back to locking the *global*
+    # ADOM, serialising every worker behind an operation that needs no lock at all.
+    "/sys/proxy/json",
+    # Firmware upgrade. Two-arm verified end to end on a live 7.6.7 appliance against a
+    # licensed FortiGate: unlocked, 7.6.7-b3704 -> 7.6.6-b3652 finished "Upgrade done
+    # successfully"; with dev/<device> held across the whole upgrade, 7.6.6 -> 7.6.7 did
+    # the same. The lock is neither required nor harmful, so taking one is pure overhead.
+    # It matters because callers pass an ADOM here: without this entry an upgrade with a
+    # real adom takes that ADOM's lock and, when track_task is set, holds it for the
+    # entire upgrade -- serialising every other worker in the ADOM for minutes.
+    "/um/image/upgrade/ext",
 })
+
+
+# Install flag that asks FortiManager to take and release the workspace lock itself.
+# Callers that already send it (the shipped ZTP flow does, on every install/package)
+# must not also be locked by the connector: measured on a live 7.6.7 appliance, an
+# auto_lock_ws install fired while this session holds a *package* lock produces a task
+# that fails with "failed to lock adom", because FMG's own auto-lock is ADOM-wide and a
+# held pkg lock blocks the ADOM lock outright. Unlocked, the same install completes
+# ("Installation to real device done"). See tests/live/auto_lock_ws_probe.py.
+#
+# The server-side lock lives on the *session*, and the install happens in a queued task
+# after the exec returns, so callers must also set track_task=True: otherwise the
+# connector logs out before FMG installs anything and the task fails with
+# "no write permission". The same timing applies to the connector's own locks.
+AUTO_LOCK_FLAG = "auto_lock_ws"
+
+
+# URLs whose lock must still be held while the *queued task* runs, not just until the
+# RPC returns. Measured three-arm on a live 7.6.7 appliance, each arm preceded by a
+# freshly staged pending change (lock held across the task / lock released at RPC
+# return / no lock at all):
+#
+#   install/package    ok / fail "Copy to device done" num_err=1 / fail
+#   install/device     ok / fail "Copy to device done" num_err=1 / fail
+#   reinstall/package  ok / fail num_err=1             / rejected at the RPC, status -1
+#
+# Script execution does NOT belong here: the lock authorises the run, but releasing it
+# at RPC return does not break the queued script.
+#
+# For these URLs the connector follows the task before releasing the lock even when the
+# caller did not ask for task tracking -- without it the connector commits, unlocks and
+# logs out while FMG is still copying, and the install fails inside a task the caller
+# never sees while the RPC reports success. The cost is hold time: an install's lock is
+# now held for the task duration (seconds to a couple of minutes), and only for callers
+# whose installs were silently failing before.
+HOLD_LOCK_UNTIL_TASK_URLS = frozenset({
+    "/securityconsole/install/package",
+    "/securityconsole/install/device",
+    "/securityconsole/reinstall/package",
+})
+
+
+def holds_lock_until_task(url: str) -> bool:
+    return url in HOLD_LOCK_UNTIL_TASK_URLS
+
+
+# URL families that can only be locked at ADOM level, so minimal-scope resolution must
+# not be attempted for them however device-shaped their payload looks.
+#
+# Measured for /dvm/cmd/add/device, /dvm/cmd/add/dev-list and /dvm/cmd/del/device on a
+# live 7.6.7 appliance, three arms each: unlocked all fail -11, the ADOM lock succeeds,
+# and the device scope is unavailable in both directions -- for a device that does not
+# exist yet the lock URL itself is rejected -10, and for a device that does exist the
+# lock is granted 0 and the delete is still refused -11. Device onboarding therefore
+# serialises per ADOM by the appliance's design, not by a connector shortcoming.
+ADOM_ONLY_URL_PREFIXES = ("/dvm/cmd/",)
+
+
+def requires_adom_lock(url: str) -> bool:
+    return any((url or "").startswith(prefix) for prefix in ADOM_ONLY_URL_PREFIXES)
+
+
+def requests_server_side_lock(data) -> bool:
+    """True when the payload asks FMG to handle workspace locking itself."""
+
+    def has_flag(node) -> bool:
+        if isinstance(node, dict):
+            flags = node.get("flags")
+            if isinstance(flags, str) and flags == AUTO_LOCK_FLAG:
+                return True
+            if isinstance(flags, (list, tuple)) and AUTO_LOCK_FLAG in flags:
+                return True
+            return any(has_flag(value) for value in node.values())
+        if isinstance(node, list):
+            return any(has_flag(item) for item in node)
+        return False
+
+    return has_flag(data)
 
 
 def get_config(config: dict) -> tuple:
@@ -108,7 +214,31 @@ def parse_adom_from_input(url: str, data: Union[list, dict]) -> str:
         return None
 
     adom = extract_adom(data)
-    return adom if adom else "global"
+    # An unresolved ADOM is returned as "" -- it used to be reported as "global", which
+    # is not the same thing and was load-bearing in the wrong direction: "global" cannot
+    # be locked on 7.6.7 (/dvmdb/global/workspace/lock -> -9, the documented
+    # /dvmdb/adom/global/... -> -6), and lock_adom() read that -9 as "this appliance has
+    # no workspace mode" and returned success. Locking was therefore silently skipped for
+    # any payload with no ADOM, on any URL. See adom_is_lockable().
+    return adom if adom else ""
+
+
+def adom_is_lockable(adom: str) -> bool:
+    """
+    Whether a workspace lock can be taken for this ADOM at all.
+
+    "global" cannot: neither documented global lock URL is accepted on 7.6.7. An empty
+    ADOM names nothing to lock. Both proceed unlocked -- global object writes do work
+    unlocked on this appliance and must keep working -- but they say so in the log
+    instead of arriving there through a misread -9.
+
+    The empty case is the dangerous one and this guard is what stops it. pyFMG's
+    lock_adom(adom) falls back to **root** for a falsy adom (verified: lock_adom("")
+    issues /dvmdb/adom/root/workspace/lock and returns 0). Without this check, a payload
+    with no ADOM would lock the root ADOM and then commit it -- publishing whatever
+    another worker had staged there.
+    """
+    return bool(adom) and adom != "global"
 
 
 def parse_track_task_params(params):
@@ -131,6 +261,13 @@ def parse_track_task_params(params):
     return track_task_params
 
 
+# Lock statuses that will never succeed on a retry: the URL names something that does not
+# exist. Everything else (notably -20055 / -20078 / -20079, the contention codes) is worth
+# waiting on. Without this split a mistyped device or package name costs a worker the full
+# MAX_RETRY_LIMIT budget -- ~2.3 hours -- instead of failing immediately.
+PERMANENT_LOCK_FAILURES = frozenset({-6, -10})
+
+
 def lock_adom(fmg, adom, url, data):
     for attempt in range(MAX_RETRY_LIMIT):
         status, _ = fmg.lock_adom(adom)
@@ -142,11 +279,32 @@ def lock_adom(fmg, adom, url, data):
         # locked when workspaces isn't enabled. This is a workaround for a pyFMG bug where uses_workspace is True when
         # it should be False. That happens because pyFMG checks a 0 or 1 int, but verbose mode returns a string.
         if status == -9:
+            # -9 means the lock URL itself is not a valid command. Two different causes,
+            # which this branch used to conflate:
+            #  * a real ADOM on an appliance where workspace mode is off, in which case
+            #    there is no lock to take and the call should continue. Note the reason
+            #    once given for this branch -- "pyFMG mis-detects workspace mode because
+            #    it compares an int while verbose mode returns a string" -- does not hold
+            #    in pyFMG 0.8.6.3: FMGLockContext.check_mode() accepts both forms
+            #    (`not in [0, "disabled"]`), and it was verified against a live appliance
+            #    to report uses_workspace correctly with verbose on and off. The branch
+            #    stays as defence in depth for other appliances and pyFMG versions, not
+            #    because of that bug.
+            #  * an ADOM that is simply not lockable ("global", or none at all). Those
+            #    are filtered out before we get here by adom_is_lockable(); reaching
+            #    this line with one means the caller bypassed that check, so fail rather
+            #    than report a lock that was never taken.
+            if not adom_is_lockable(adom):
+                logger.error(
+                    f"ADOM: {adom!r} cannot be locked and no lock was taken for URL: {url}.")
+                return False
             logger.debug(f"Workspaces not enabled. Locking ADOM: {adom} not required.")
             return True
-        # status == -6 when URL is invalid. This could occur when a nonexistent adom is attempted to be locked.
-        if status == -6:
-            logger.error(f"URL is invalid. ADOM: {adom} does not exist.")
+        # status == -6 when URL is invalid. This could occur when a nonexistent adom is
+        # attempted to be locked. -10 is the same class of permanent rejection; see
+        # PERMANENT_LOCK_FAILURES.
+        if status in PERMANENT_LOCK_FAILURES:
+            logger.error(f"Lock URL rejected with status {status}. ADOM: {adom} does not exist.")
             return False
         if attempt < MAX_RETRY_LIMIT - 1:
             # Sleep for a random amount of time between 1 and 10 seconds
@@ -207,6 +365,93 @@ def parse_minimal_lock_scope(url: str, known_packages=None) -> tuple:
 
     return None, None
 
+
+def resolve_package_path(package: str, known_packages=None) -> Union[str, None]:
+    """
+    Expand a bare package name to the full path FMG addresses it by.
+
+    A package inside a folder is only addressable as "folder1/package1", but a payload
+    may name it either way. Returns None when the name is ambiguous (the same leaf in
+    two folders), so the caller can fall back to ADOM-level locking rather than lock
+    the wrong package.
+    """
+    if not known_packages or package in known_packages:
+        return package
+    matches = [path for path in known_packages if path.endswith("/" + package)]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        logger.debug(f"Package name {package} is ambiguous: {matches}. Falling back to ADOM lock.")
+        return None
+    return package
+
+
+def parse_payload_lock_scope(data: dict, known_packages=None) -> tuple:
+    """
+    Determine the minimal lock scope from a request payload.
+
+    Several operations carry no scope in the URL but name one in the body: script
+    execution passes the target device in "scope" or the target policy package in
+    "package", and a package install passes both "pkg" and the device "scope". Without
+    this the connector locks the whole ADOM for every one of them, which is the bulk of
+    real automation traffic.
+
+    Package wins over device when both are present. Verified on a live appliance:
+    installing a package while holding only the device lock fails with
+    "no write permission", while the package lock alone succeeds.
+
+    Returns (None, None) when the payload names several devices, since one lock cannot
+    cover them and ADOM-level locking is the safe answer.
+
+    /securityconsole/reinstall/package carries its packages differently again, in a
+    target[] list of {pkg, scope} pairs, which is what lets one call install several
+    packages to several devices. single_target_package() handles that shape.
+    """
+    if not isinstance(data, dict):
+        return None, None
+
+    package = data.get("package") or data.get("pkg") or single_target_package(data)
+    if isinstance(package, str) and package:
+        resolved = resolve_package_path(package, known_packages)
+        if resolved:
+            return "pkg", resolved
+        return None, None
+
+    scope = data.get("scope")
+    if isinstance(scope, list) and len(scope) == 1 and isinstance(scope[0], dict):
+        device = scope[0].get("name")
+        if isinstance(device, str) and device:
+            return "dev", device
+
+    return None, None
+
+
+
+def single_target_package(data: dict):
+    """
+    Return the one package named by a reinstall-style target[] payload, else None.
+
+    /securityconsole/reinstall/package takes target: [{"pkg": ..., "scope": [...]}],
+    so the package never appears under "pkg" at the top level and the connector locked
+    the whole ADOM for every reinstall. Measured on a live 7.6.7 appliance:
+
+      one target, package lock          -> accepted, task completes (group scope too)
+      two targets, lock on one package  -> rejected outright, status -1
+      any target, no lock               -> rejected outright, status -1
+
+    So a package lock is correct for a single-package reinstall and wrong the moment a
+    second package joins the call; several packages fall back to the ADOM lock, which is
+    the same rule the multi-device case already follows.
+    """
+    targets = data.get("target")
+    if not isinstance(targets, list) or not targets:
+        return None
+    packages = {entry.get("pkg") for entry in targets
+                if isinstance(entry, dict) and isinstance(entry.get("pkg"), str)}
+    if len(packages) != 1 or len(targets) != 1:
+        return None
+    package = packages.pop()
+    return package or None
 
 def list_adom_packages(fmg, adom: str) -> list:
     """
@@ -286,8 +531,16 @@ def lock_minimal_scope(fmg, adom: str, scope_type: str, scope_id: str, url: str,
             logger.debug(f"Workspaces not enabled. Locking {scope_type}/{scope_id} not required.")
             return True
         # -6 means the URL is invalid -- the ADOM, package, or device does not exist.
-        if status == -6:
-            logger.error(f"URL is invalid. {scope_type}/{scope_id} in ADOM: {adom} does not exist.")
+        # -10 is the same class of answer for a scope lock: FMG rejects the lock URL for
+        # a device or package that is not there ("The data is invalid for selected url").
+        # Measured while probing device onboarding: locking dev/<name> before the device
+        # is registered returns -10, and the identical URL returns 0 once it exists.
+        # Both are permanent, so retrying is 1500 attempts of 1-10s -- about 2.3 hours of
+        # a worker doing nothing over a name that will never resolve.
+        if status in PERMANENT_LOCK_FAILURES:
+            logger.error(
+                f"Lock URL rejected with status {status}. {scope_type}/{scope_id} in "
+                f"ADOM: {adom} does not exist; not retrying.")
             return False
         if attempt < MAX_RETRY_LIMIT - 1:
             sleep_time = random.randint(1, 10)
@@ -358,7 +611,18 @@ def perform_rpc_action(action: str, config: dict, params: dict) -> dict:
                 action not in ["get"]
                 and fmg._lock_ctx.uses_workspace
                 and url not in NO_LOCK_URLS
+                and not requests_server_side_lock(data)
             )
+
+            # An ADOM that cannot be locked is not the same as an operation that needs
+            # no lock. Say so once, here, and proceed unlocked -- global-ADOM writes are
+            # accepted unlocked on 7.6.7, and there is no lock URL to take for them.
+            if needs_lock and not adom_is_lockable(adom):
+                logger.warning(
+                    f"No lockable ADOM resolved (adom={adom!r}) for URL: {url}. "
+                    "Proceeding without a workspace lock; pass an explicit adom if this "
+                    "request writes to a lockable ADOM.")
+                needs_lock = False
 
             # Resolve the lock scope. With minimal_locking enabled the connector
             # attempts to lock only the policy package or device referenced in the
@@ -366,14 +630,23 @@ def perform_rpc_action(action: str, config: dict, params: dict) -> dict:
             # with concurrent automation workers. Falls back to ADOM-level locking
             # when no finer scope can be parsed, or when the ADOM is "global".
             scope_type, scope_id = None, None
-            if needs_lock and config.get("minimal_locking", False) and adom != "global":
+            if needs_lock and config.get("minimal_locking", False) and not requires_adom_lock(url):
                 # Ask the appliance for the ADOM's package paths so packages nested in
-                # folders resolve to the path FMG actually accepts in a lock URL.
-                known_packages = list_adom_packages(fmg, adom) if "/pkg/" in (url or "") else []
+                # folders resolve to the path FMG actually accepts in a lock URL. Only
+                # worth the extra call when a package could actually be involved.
+                names_package = "/pkg/" in (url or "") or bool(
+                    isinstance(data, dict) and (data.get("package") or data.get("pkg")
+                                                or single_target_package(data)))
+                known_packages = list_adom_packages(fmg, adom) if names_package else []
+
                 if action == "free_form":
                     scope_type, scope_id = parse_free_form_lock_scope(data, known_packages)
                 else:
                     scope_type, scope_id = parse_minimal_lock_scope(url, known_packages)
+                    if scope_type is None:
+                        # Nothing in the URL, but the body may still name the single
+                        # package or device the request touches.
+                        scope_type, scope_id = parse_payload_lock_scope(data, known_packages)
 
             if needs_lock:
                 if scope_type is not None:
@@ -408,10 +681,19 @@ def perform_rpc_action(action: str, config: dict, params: dict) -> dict:
                 response[f"{action}_response"] = action_response
                 # If the action is execute and track_task is set to True, track the task
                 # Also need to make sure that the response is a dict because some exec actions like sys/proxy/info can return a list
-                if action == 'execute' and params.get("track_task", False) and isinstance(action_response, dict):
+                # Installs need the lock held while the queued task copies to the
+                # device, so for those URLs the task is followed here whether or not the
+                # caller asked for tracking -- the release below must not happen first.
+                track_requested = bool(params.get("track_task", False))
+                hold_until_task = needs_lock and holds_lock_until_task(url)
+                if action == 'execute' and (track_requested or hold_until_task) and isinstance(action_response, dict):
                     task = action_response.get('task') or action_response.get('taskid')
                     # handle case where no task id is found and there is an attempt to track task
-                    if not task:
+                    if not task and not track_requested:
+                        # Nothing to wait on and the caller never asked for a task, so
+                        # there is no lock-lifetime problem and nothing to report.
+                        pass
+                    elif not task:
                         response["task_response"] = None
                         # Surface the FMG status message (e.g. "No devices") when present,
                         # so callers know *why* no task was created instead of a generic
@@ -423,8 +705,13 @@ def perform_rpc_action(action: str, config: dict, params: dict) -> dict:
                             response["error"] = "No task id found in execute_response and track_task is set to True."
                     else:
                         track_task_params = parse_track_task_params(params)
-                        status, task_response = fmg.track_task(task, **track_task_params)
+                        track_status, task_response = fmg.track_task(task, **track_task_params)
                         response["task_response"] = task_response
+                        # A caller who did not ask for tracking still gets the task
+                        # outcome -- it is how an install reports failure -- but keeps
+                        # the RPC's own status as the top-level one.
+                        if track_requested:
+                            status = track_status
 
                         # Handle special cases. Putting this here because the task needs to be tracked first for exec actions
                         special_case_result = handle_special_cases(fmg, url, data, action_response, task_response)
