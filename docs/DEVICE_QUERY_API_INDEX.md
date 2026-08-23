@@ -34,6 +34,74 @@ FortiOS REST through the proxy -- connector operation **execute**, `url = /sys/p
   "payload": {"url": ["www.fortinet.com"]}}` answers `status: success`, while `GET` on the
   same resource is rejected `-6 Invalid url`.
 
+### Enumerating interfaces: `available-interfaces` sees down interfaces, `interface` does not
+
+This matters for any check shaped like "is the link down on one member but not the other",
+because the two endpoints do not enumerate the same set. Measured on a live 7.6.7
+FortiGate:
+
+- `/api/v2/monitor/system/interface?scope=global` returned **2** entries: `port1`, `port2`.
+- `/api/v2/monitor/system/available-interfaces` returned **9**, including `port4` and
+  `fortilink` -- both carrying `status: "up"` with `link: "down"`.
+
+An interface that is administratively up but physically down is **absent entirely** from
+`interface`, so a playbook enumerating that endpoint reads "not present" where the truth
+is "present and down". That is the exact case worth alerting on, and it is the one that
+silently disappears.
+
+`available-interfaces` also keeps admin state and link state as two distinct fields
+(`status` vs `link`), which is what a "if it is not admin down, interrogate it" rule
+needs; `interface` collapses link to a bare boolean and carries no admin state at all. It
+does have the error and byte counters, which `available-interfaces` lacks -- so the two
+are complements, not alternatives: enumerate with `available-interfaces`, then pull
+counters for a named port from `interface`.
+
+`available-interfaces` also returns non-physical entries (`ssl.root`, `naf.root`,
+`virtual-wan-link`, and a synthetic `any` whose fields are all null). Filter on
+`type == "physical"` for a true physical-port list, and note that `port4` above was
+`type: "vlan"` -- a "port" by name is not necessarily `type: physical`.
+
+### Per-member interface state in an HA cluster is the hard case
+
+"Which ports are up on the primary, and which on the secondary" does not fall out of any
+single call, because **FortiManager manages a cluster as one device object**.
+`/sys/proxy/json` reaches whichever unit is currently primary, and there is no second
+device to target. `/sys/proxy/cli` and `/sys/proxy/xml` both answer `-11` on this
+appliance, so an `execute ha manage` hop is not available either.
+
+What each mechanism does give you:
+
+| Mechanism | Source | Per member? | Interface state? |
+|---|---|---|---|
+| `/dvmdb/adom/<adom>/device/<dev>/ha_slave` | FMG DB, no device traffic | yes -- name, sn, role, status, prio | no |
+| `ha-peer`, `ha-statistics`, `ha-checksums` | proxy, one call | yes -- one entry per member | no |
+| `available-interfaces` | proxy | **no** -- only the unit that answered | yes |
+| `/pm/config/device/<dev>/global/system/interface` | FMG DB | n/a -- config is HA-synchronised, identical on both | config only, not link state |
+
+So the roster, the roles, and per-member *health* are all available; per-member *physical
+link state* is the gap. Note this is exactly the gap that matters for a "link down on one
+member but not the other" rule.
+
+**`?serial=<member>` is not a solution, and worse, it fails silently.** Measured on a
+standalone unit: `available-interfaces?serial=FGVMBOGUS0000000` returns `status:
+success` carrying the answering unit's own data and its own serial. An ignored parameter
+is indistinguishable from a working one unless you check what came back -- so a playbook
+using `?serial=` on a cluster could label the primary's ports as the secondary's and
+never see an error.
+
+**Always read `response.serial`.** Every proxied response carries the serial of the unit
+that actually answered. It is the only reliable way to attribute an answer to a member,
+and any HA workflow should assert it rather than trusting the request.
+
+**Still open, needs a real cluster.** Whether `?serial=` is honoured when HA is *active*
+(rather than ignored as it is standalone) is untested: this appliance manages no HA
+cluster at all -- every device reports `ha_mode: 0`, and the only reachable unit is a
+standalone VM. `/api/v2/monitor/system/ha-hw-interface` is the other candidate for
+per-member port state and is likewise unverified (`-6` / HTTP 503 on a VM; it appears to
+be hardware or hyperscale only). `tests/live/ha_member_interface_probe.py` walks all four
+mechanisms and reports which member answered each call; point it at a cluster and it
+answers the open question in one run.
+
 ### The multi-target contract has three outcomes, and only one of them looks like an error
 
 `target` accepts several devices in one call, and the RPC status tells you nothing about
@@ -55,6 +123,27 @@ lives under `/pm/config/device/<device>/global/...` (global settings) or
 `/pm/config/device/<device>/vdom/<vdom>/...` (per-VDOM settings); device metadata lives
 under `/dvmdb/adom/<adom>/device/<device>`.
 
+### `execute sensor list` is the one row that stays unverified
+
+A VM has no thermal, fan, or PSU sensors, so the expected explanation for the 404s is
+that FortiOS does not register the endpoint on a platform with nothing to report, and a
+chassis would answer normally. That is a hypothesis, not a measurement.
+
+It could not be settled on this appliance. The FMG's inventory does contain hardware
+(FortiGate-2601F, 3600E, 3960E, 900D, 91G, 90G, 70G and others), but every hardware unit
+is offline -- the proxy answers `status.code: -1`, `"<device>(NNN) error: No tunnel 80."`,
+meaning FMG has no management tunnel to it. The only reachable, licensed FortiGate is a
+VM, which is exactly the platform that cannot answer the question.
+
+So treat the row as open. If a playbook needs sensor data, have it tolerate `-6` rather
+than assume the call works, and confirm against a real chassis before relying on it. Note
+also that a 404 here is a different answer from the HTTP 503 that
+`/api/v2/monitor/system/ha-hw-interface` returns on the same VM; 503 reads as "endpoint
+exists, this platform cannot serve it", which is the shape a genuinely
+platform-gated endpoint takes. That asymmetry is weak evidence *against* the
+hardware-only theory for the sensor endpoints, and is the main reason this is recorded as
+unresolved rather than assumed.
+
 ## The index
 
 | Wanted (CLI) | FortiOS REST via `/sys/proxy/json` | FortiManager-native | Verified |
@@ -62,12 +151,13 @@ under `/dvmdb/adom/<adom>/device/<device>`.
 | `get system status` | `/api/v2/monitor/system/status` | `/dvmdb/adom/<adom>/device/<device>` → `os_ver`, `mr`, `patch`, `build`, `platform_str`, `conn_status` | both |
 | running firmware | `/api/v2/monitor/system/firmware` | same device record (`os_ver`/`mr`/`patch`/`build`) | both |
 | `config system ha` | `/api/v2/cmdb/system/ha` → `mode`, `group-name`, `group-id` | `/pm/config/device/<device>/global/system/ha` | both |
-| `get system ha status` | `/api/v2/monitor/system/ha-statistics`, `/api/v2/monitor/system/ha-peer` | `/dvmdb/adom/<adom>/device/<device>` → `ha_mode`, `ha_group_name`; cluster members at `/dvmdb/adom/<adom>/device/<device>/ha_slave` | both |
+| `get system ha status` | `/api/v2/monitor/system/ha-checksums` (config sync), `/api/v2/monitor/system/ha-statistics` (session counts), `/api/v2/monitor/system/ha-peer` (peer serial); `/api/v2/monitor/system/ha-hw-interface` is hardware/hyperscale only -- `-6 Invalid url` with HTTP 503 on a VM | `/dvmdb/adom/<adom>/device/<device>` → `ha_mode`, `ha_group_name`; cluster members at `/dvmdb/adom/<adom>/device/<device>/ha_slave` | both |
 | `diagnose sys ha checksum cluster` | `/api/v2/monitor/system/ha-checksums` | -- (live-only state) | proxy |
 | `diag sys ha history read` | `/api/v2/monitor/system/ha-history` | -- | proxy |
-| `get system interface physical` | `/api/v2/monitor/system/interface?scope=global` → link, speed, IP, counters | -- (live-only state) | proxy |
+| `get system interface physical` | `/api/v2/monitor/system/available-interfaces` → **`status` (admin) and `link` (physical) as separate fields**, plus speed, duplex, MAC, IPv4, `type`, `vdom`. Use this one; see the enumeration warning below | -- (live-only state) | proxy |
+| interface counters / errors | `/api/v2/monitor/system/interface?scope=global` → `link` (bool), `speed`, `duplex`, `tx_bytes`/`rx_bytes`, `tx_errors`/`rx_errors` | -- (live-only state) | proxy |
 | `config system interface` | `/api/v2/cmdb/system/interface?vdom=<vdom>` → `status` (`up`/`down`) | `/pm/config/device/<device>/global/system/interface` | both |
-| `execute sensor list` | `/api/v2/monitor/system/sensor-info` | -- | **not available** on a VM (`-6 Invalid url`, as are `system/sensors` and `system/hardware-status`); unverified on hardware |
+| `execute sensor list` | `/api/v2/monitor/system/monitor-sensor`, `/api/v2/monitor/system/sensor-info` | -- | **hardware only, unverified.** Four spellings (`monitor-sensor`, `sensor-info`, `system/sensors`, `system/hardware-status`) all answer `-6 Invalid url` / HTTP 404 on a VM. Most likely the endpoint is not registered on platforms with no physical sensors rather than absent from the firmware -- but see below: it could not be confirmed |
 | device health / load (the VM-safe substitute) | `/api/v2/monitor/system/resource/usage`, `/api/v2/monitor/system/performance/status` | -- | proxy |
 | `config router static` (per VDOM) | `/api/v2/cmdb/router/static?vdom=<vdom>` | `/pm/config/device/<device>/vdom/<vdom>/router/static` | both |
 | `config router bgp` (per VDOM) | `/api/v2/cmdb/router/bgp?vdom=<vdom>` | `/pm/config/device/<device>/vdom/<vdom>/router/bgp` | both |
@@ -76,7 +166,8 @@ under `/dvmdb/adom/<adom>/device/<device>`.
 | policies as the device has them | `/api/v2/cmdb/firewall/policy?vdom=<vdom>` | policy package under `/pm/config/adom/<adom>/pkg/<pkg>/firewall/policy` | both |
 | `get webfilter status` (per VDOM) | no single equivalent -- see below | `/pm/config/device/<device>/vdom/<vdom>/webfilter/profile` | partial |
 | FortiGuard URL rating (POST) | `/api/v2/monitor/utm/rating-lookup` with `payload: {"url": [...]}` | -- | proxy |
-| licence / FortiGuard contract state | `/api/v2/monitor/license/status`, `/api/v2/monitor/system/fortiguard/server-info` | -- | proxy |
+| `get webfilter status` / licence / FortiGuard contract state | `/api/v2/monitor/license/status` (add `?vdom=<vdom>` per VDOM), `/api/v2/monitor/system/fortiguard/server-info` | -- | proxy |
+| FortiGuard per-service traffic counters | `/api/v2/monitor/fortiguard/service-communication-stats` → per service (`forticare`, `fortiguard.com`, `fortiguard_download`, `forticloud_log`, ...) as `1_hour` / `24_hour` / `1_week` buckets. Note the path has no `system/` segment | -- | proxy |
 
 `sudo <vdom> <command>` in the CLI list is just per-VDOM scoping: add `?vdom=<vdom>` to
 the proxied resource, or address `/pm/config/device/<device>/vdom/<vdom>/...` on the FMG
@@ -94,17 +185,24 @@ separates EMPTY from FAIL deliberately -- see the caution below.
 
 ## Gaps and cautions
 
-- **`get webfilter status` has no direct endpoint.** The CLI command reports FortiGuard
-  web-filter rating service reachability. The closest proxied reads are
-  `/api/v2/monitor/system/fortiguard/server-info` and `/api/v2/monitor/license/status`
-  (which carries FortiGuard entitlement); `/api/v2/monitor/webfilter/category-quota`
-  answers but describes quota, not service state. `/api/v2/monitor/utm/rating-lookup`
-  exists but rejects `GET` -- it is a POST endpoint.
+- **`get webfilter status` has no single equivalent, but three reads together cover it.**
+  The CLI command reports FortiGuard web-filter rating service reachability.
+  `/api/v2/monitor/license/status` gives entitlement (add `?vdom=<vdom>` for the per-VDOM
+  form), `/api/v2/monitor/fortiguard/service-communication-stats` gives whether the box is
+  actually *talking* to each FortiGuard service (`1_hour` / `24_hour` / `1_week` request
+  counters per service), and `/api/v2/monitor/system/fortiguard/server-info` gives the
+  server it is using. Entitled-but-not-communicating is the failure worth alerting on and
+  only the stats endpoint shows it. `/api/v2/monitor/webfilter/category-quota` answers but
+  describes quota, not service state, and `/api/v2/monitor/utm/rating-lookup` rejects
+  `GET` -- it is a POST endpoint. Mind the paths: the stats endpoint has no `system/`
+  segment, `server-info` does.
 - **`execute sensor list` is not merely empty on a VM, it is rejected** (`-6 Invalid
-  url`), and so are `system/sensors` and `system/hardware-status`. Whether that is the
-  platform or the firmware is untested -- there is no hardware FortiGate on the bench to
-  tell them apart. If a playbook needs a health signal that works everywhere,
-  `system/resource/usage` and `system/performance/status` both answer on a VM.
+  url`), as are `monitor-sensor`, `system/sensors` and `system/hardware-status`. Whether
+  that is the platform or the firmware is still untested: the FMG *does* manage hardware
+  (2601F, 3600E, 3960E, 900D, 91G, 90G, 70G), but every hardware unit is offline with no
+  management tunnel, so the proxy cannot reach one. See the dedicated section above. If a
+  playbook needs a health signal that works everywhere, `system/resource/usage` and
+  `system/performance/status` both answer on a VM.
 - **Empty is not broken.** On a standalone unit `ha-statistics`, `ha-peer`,
   `ha-checksums`, `ha-history` and `ha_slave` all answer successfully with nothing in
   them, and `cmdb/system/ha` reports `mode: standalone`. Same for `bgp/neighbors` where no
@@ -305,6 +403,69 @@ Keyed by interface name. `link`, `speed`, `ip` and the counters are the live val
     "ip": "192.0.2.1",
     "mask": 24,
     "...": "(+9 more keys)"
+  }
+}
+```
+
+### get system interface physical (enumeration) -- proxy
+
+`/api/v2/monitor/system/available-interfaces`
+
+Trimmed to three of the nine entries: one healthy physical port, one interface that is
+admin-up but link-down (the case `interface?scope=global` omits entirely), and the
+synthetic `any` whose fields are all null.
+
+```json
+[
+  {
+    "name": "port1", "type": "physical", "real_interface_name": "port1",
+    "vdom": "root", "is_system_interface": true,
+    "status": "up", "link": "up", "duplex": "full", "speed": 10000,
+    "port_speed": "auto", "media": "rj45", "role": "undefined", "vrf": 0,
+    "ipv4_addresses": [
+      {"ip": "192.0.2.2", "netmask": "255.255.255.0", "cidr_netmask": 24}
+    ],
+    "mac_address": "<mac>",
+    "vlan_protocol": "8021q", "dhcp4_client_count": 0, "dhcp6_client_count": 0,
+    "in_bandwidth_limit": 0, "out_bandwidth_limit": 0, "monitor_bandwidth": false
+  },
+  {
+    "name": "port4", "type": "vlan", "vdom": "root", "is_system_interface": true,
+    "status": "up", "link": "down", "speed": null
+  },
+  {
+    "name": "any", "valid_in_policy": true, "valid_in_local_in_policy": true,
+    "type": null, "status": null, "link": null
+  }
+]
+```
+
+### FortiGuard service communication stats -- proxy
+
+`/api/v2/monitor/fortiguard/service-communication-stats`
+
+Per service, request counts bucketed by 12 x 1 hour, 24 x 1 hour, and 7 x 1 day. A
+service with all-zero buckets is entitled but silent, which is the state
+`license/status` alone will not show you. Trimmed to three of the services returned.
+
+```json
+{
+  "forticare": {
+    "1_hour": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "24_hour": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "1_week": [0, 0, 0, 0, 0, 0, 0]
+  },
+  "fortiguard.com": {
+    "1_hour": [0, 0, 3211, 0, 1368, 142906, 0, 0, 3211, 0, 0, 0],
+    "24_hour": [147485, 7052, 8420, 7052, 8420, 7052, 8420, 7052, 10474, 7052, 150673,
+                7052, 8420, 7052, 8420, 4733772, 11485272, 39825038, 29873515, 9963154,
+                25486721, 0, 0, 0],
+    "1_week": [185481, 121582087, 0, 0, 0, 0, 0]
+  },
+  "fortiguard_download": {
+    "1_hour": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "24_hour": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "1_week": [0, 0, 0, 0, 0, 0, 0]
   }
 }
 ```

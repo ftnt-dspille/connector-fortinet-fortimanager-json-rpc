@@ -375,10 +375,10 @@
           "type": "json",
           "editable": true,
           "visible": true,
-          "required": true,
+          "required": false,
           "placeholder": {},
           "value": {},
-          "description": "Pass a json object for the data you want to send. ",
+          "description": "Optional JSON object for the delete payload. Omit it to delete the object addressed by the URL, which is the common case.",
           "isOnChange": false,
           "onchange": {}
         }

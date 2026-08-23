@@ -55,6 +55,22 @@ NO_LOCK_URLS = frozenset({
     # real adom takes that ADOM's lock and, when track_task is set, holds it for the
     # entire upgrade -- serialising every other worker in the ADOM for minutes.
     "/um/image/upgrade/ext",
+    # Read-only firmware queries. These take an `adom` in the payload, which is enough
+    # for parse_adom_from_input to resolve a lockable ADOM, so before this entry the
+    # connector locked that ADOM to run a *read*. Measured three-arm on a live 7.6.7
+    # appliance for both URLs:
+    #
+    #   no adom in payload            -> proceeds unlocked, status 0
+    #   adom in payload, ADOM free    -> takes an ADOM lock it does not need
+    #   adom in payload, ADOM held    -> BLOCKED, cannot acquire the lock
+    #
+    # The third arm is the damaging one: called directly while another session held the
+    # ADOM lock, both URLs still returned status 0 with full results, so the lock is not
+    # merely unnecessary, it is the only reason the read can fail. In a change window
+    # that turns a firmware image list into a call that retries for up to
+    # MAX_RETRY_LIMIT * 10s behind an unrelated writer.
+    "/um/image/list/ext",
+    "/um/image/version/list",
 })
 
 

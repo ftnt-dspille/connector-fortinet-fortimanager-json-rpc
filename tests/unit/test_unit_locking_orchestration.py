@@ -968,3 +968,146 @@ class TestAdomOnlyUrls:
                      "scope": [{"name": "fgt", "vdom": "root"}]},
         }, MINIMAL)
         assert workspace_calls(fmg)[0] == "/dvmdb/adom/root/workspace/lock/dev/fgt"
+
+
+# ---------------------------------------------------------------------------
+# Invariants. These are not tests of a feature, they are guards on two
+# properties every path through perform_rpc_action must have, whatever the
+# URL, action, or config. They exist so a future scope rule cannot quietly
+# reintroduce the deadlock or the leak.
+# ---------------------------------------------------------------------------
+
+class SessionFakeFMG(FakeFMG):
+    """
+    FakeFMG that also models what pyFMG does at session exit.
+
+    The legacy ADOM path never calls `unlock_adom` explicitly unless it tracked a task:
+    `perform_rpc_action` wraps every call in `with FortiManager(...)`, and pyFMG's
+    `__exit__` -> `logout()` -> `FMGLockContext.run_unlock()` releases every ADOM
+    registered through `lock_adom`. That is a real release -- section I.4 measured the
+    appliance dropping the lock at session end too -- but it is invisible to a fake that
+    does not model it, which would make the balance invariant below unprovable for the
+    ADOM path.
+
+    Kept as a subclass rather than folded into FakeFMG because the existing tests assert
+    exact `fmg.calls` lists and must not grow implicit entries.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._locked_adoms = []
+
+    def lock_adom(self, adom):
+        self._locked_adoms.append(adom)
+        return super().lock_adom(adom)
+
+    def unlock_adom(self, adom):
+        if adom in self._locked_adoms:
+            self._locked_adoms.remove(adom)
+        return super().unlock_adom(adom)
+
+    def __exit__(self, *exc_info):
+        for adom in list(self._locked_adoms):
+            self.unlock_adom(adom)
+        return False
+
+
+def lock_events(fmg):
+    """(+1 per lock acquired, -1 per lock released), in call order."""
+    events = []
+    for name, url in fmg.calls:
+        if name == "lock_adom":
+            events.append(1)
+        elif name == "unlock_adom":
+            events.append(-1)
+        elif name == "execute" and "/workspace/lock" in (url or ""):
+            events.append(1)
+        elif name == "execute" and "/workspace/unlock" in (url or ""):
+            events.append(-1)
+    return events
+
+
+# Every combination the connector routes differently: ADOM-scoped object writes,
+# package-scoped policy writes, nested packages, device-database writes, the
+# execute URLs that take no lock, an install that now holds its lock across the
+# task, and an ADOM-only command.
+INVARIANT_CASES = [
+    ("set", {"url": OBJ_URL, "data": {}}),
+    ("set", {"url": PKG_URL, "data": {}}),
+    ("set", {"url": "/pm/config/adom/root/pkg/folder1/package1/firewall/policy", "data": {}}),
+    ("set", {"url": "/dvmdb/adom/root/device/dev1", "data": {}}),
+    ("add", {"url": OBJ_URL, "data": {}}),
+    ("execute", {"url": "/sys/proxy/json", "data": {}}),
+    ("execute", {"url": "/securityconsole/install/package",
+                 "data": {"adom": "root", "pkg": "Pkg1"}}),
+    ("execute", {"url": "/securityconsole/install/device",
+                 "data": {"adom": "root", "scope": [{"name": "dev1"}]}}),
+    ("execute", {"url": "/dvm/cmd/add/device", "data": {"adom": "root"}}),
+    ("get", {"url": OBJ_URL}),
+]
+
+INVARIANT_IDS = [f"{action}:{params['url']}" for action, params in INVARIANT_CASES]
+
+
+class TestLockingInvariants:
+    @pytest.mark.parametrize("action,params", INVARIANT_CASES, ids=INVARIANT_IDS)
+    @pytest.mark.parametrize("config", [BASE_CONFIG, MINIMAL], ids=["adom", "minimal"])
+    def test_never_holds_more_than_one_lock(self, action, params, config):
+        """
+        The no-deadlock invariant.
+
+        Two locks held at once is how a deadlock becomes possible: two workers taking the
+        same pair in opposite orders wait on each other forever. The connector's defence
+        is that it never holds more than one, and nothing enforces that today beyond the
+        shape of the code. Checked as a running depth rather than a count, so a path that
+        takes a second lock *while* holding the first fails even if both are released.
+        """
+        fmg = SessionFakeFMG()
+        run_action(fmg, action, params, config)
+        depth = 0
+        for event in lock_events(fmg):
+            depth += event
+            assert depth <= 1, f"held {depth} locks at once: {fmg.calls}"
+
+    @pytest.mark.parametrize("action,params", INVARIANT_CASES, ids=INVARIANT_IDS)
+    @pytest.mark.parametrize("config", [BASE_CONFIG, MINIMAL], ids=["adom", "minimal"])
+    def test_lock_is_never_held_across_calls(self, action, params, config):
+        """
+        Every lock this call takes, this call releases.
+
+        A lock that outlives its `perform_rpc_action` is invisible here and catastrophic
+        in production: section I.3 measured that an abandoned scope lock is not released
+        when the session dies, another session's unlock returns 0 without clearing it,
+        and it then wedges for the 8-hour API idle timeout. Two calls are driven through
+        the same fake so a leak from the first shows up as unbalanced depth overall.
+        """
+        fmg = SessionFakeFMG()
+        run_action(fmg, action, params, config)
+        run_action(fmg, action, params, config)
+        assert sum(lock_events(fmg)) == 0, f"lock left held: {fmg.calls}"
+
+
+class TestReadOnlyExecUrlsTakeNoLock:
+    """
+    Read-only `execute` URLs must not lock, even when the caller passes an ADOM.
+
+    These carry `adom` in the payload, which is enough for the connector to resolve a
+    lockable ADOM, so the pre-fix behaviour was to lock the whole ADOM to run a read --
+    and to block outright when another session held it, despite the same call succeeding
+    unlocked while that lock was held.
+    """
+
+    @pytest.mark.parametrize("url", ["/um/image/list/ext", "/um/image/version/list"])
+    @pytest.mark.parametrize("config", [BASE_CONFIG, MINIMAL], ids=["adom", "minimal"])
+    def test_firmware_queries_take_no_lock(self, url, config):
+        fmg = FakeFMG()
+        run_action(fmg, "execute", {"url": url, "data": {"adom": "root"}}, config)
+        assert workspace_calls(fmg) == []
+        assert [name for name, _ in fmg.calls if name in ("lock_adom", "unlock_adom")] == []
+
+    def test_firmware_upgrade_still_takes_no_lock(self):
+        """The neighbouring upgrade URL must keep its existing exemption."""
+        fmg = FakeFMG()
+        run_action(fmg, "execute", {"url": "/um/image/upgrade/ext",
+                                    "data": {"adom": "root"}}, MINIMAL)
+        assert workspace_calls(fmg) == []
