@@ -71,6 +71,15 @@ NO_LOCK_URLS = frozenset({
     # MAX_RETRY_LIMIT * 10s behind an unrelated writer.
     "/um/image/list/ext",
     "/um/image/version/list",
+    # The rest of the read-only `/um/` surface, found by sweeping for further instances
+    # of the same class (tests/live/readonly_exec_sweep_probe.py). Each was called
+    # unlocked while a second session held the ADOM lock and still returned its full
+    # payload -- an image list, a device inventory, a version matrix, an upgrade status
+    # -- so none of them needs the lock the connector used to take.
+    "/um/image/list",
+    "/um/image/version/list/ext",
+    "/um/device/list",
+    "/um/image/upgrade/status",
 })
 
 
@@ -689,8 +698,14 @@ def perform_rpc_action(action: str, config: dict, params: dict) -> dict:
 
                 if needs_lock and scope_type is None:
                     fmg.commit_changes(adom)
-                    # Consider unlocking the adom here, but not sure if it's safe to do so if there is a task to track
-                    # Not unlocking here could potentially cause delays in other workers that need to lock the same adom
+                    # Deliberately no unlock here. Releasing at this point is unsafe for
+                    # the install URLs: the queued task copies config to the device after
+                    # the RPC returns, and dropping the lock mid-copy lets another worker
+                    # write the ADOM underneath a running install -- which is why
+                    # HOLD_LOCK_UNTIL_TASK_URLS exists. For every other URL the release
+                    # happens a few statements later (or at session teardown, which pyFMG
+                    # does on __exit__), so an early unlock here would buy back only the
+                    # duration of the task-tracking block while adding that hazard.
                 elif minimal_lock_held:
                     commit_minimal_scope(fmg, adom, scope_type, scope_id)
 
@@ -734,7 +749,13 @@ def perform_rpc_action(action: str, config: dict, params: dict) -> dict:
                         if special_case_result:
                             response["special_case_response"] = special_case_result
 
-                    # I'm not sure if we need to commit changes here after the task is tracked, but leaving it here for now
+                    # The commit is redundant in the common case -- the write was already
+                    # committed above and a queued task does not add ADOM changes of its
+                    # own -- but it is safe to repeat: workspace/commit is idempotent,
+                    # returning status 0 with nothing pending and even with no lock held.
+                    # It is kept because the special-case handlers above can write, and
+                    # costs one round trip. Note the corollary: a commit returning 0 is
+                    # not evidence that a write landed, so never judge one by its status.
                     # The minimal-scope path already committed above and commits again on
                     # release, so only the ADOM path needs the extra commit/unlock here.
                     if needs_lock and scope_type is None:

@@ -1097,7 +1097,16 @@ class TestReadOnlyExecUrlsTakeNoLock:
     unlocked while that lock was held.
     """
 
-    @pytest.mark.parametrize("url", ["/um/image/list/ext", "/um/image/version/list"])
+    @pytest.mark.parametrize("url", [
+        "/um/image/list/ext",
+        "/um/image/version/list",
+        # Found by the read-only sweep: each returns its full payload while another
+        # session holds the ADOM lock, so none of them needs a lock of its own.
+        "/um/image/list",
+        "/um/image/version/list/ext",
+        "/um/device/list",
+        "/um/image/upgrade/status",
+    ])
     @pytest.mark.parametrize("config", [BASE_CONFIG, MINIMAL], ids=["adom", "minimal"])
     def test_firmware_queries_take_no_lock(self, url, config):
         fmg = FakeFMG()
