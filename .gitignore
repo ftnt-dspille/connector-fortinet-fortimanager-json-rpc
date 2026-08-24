@@ -1,0 +1,28 @@
+# Secrets and local-only working files. These were previously in .git/info/exclude,
+# which is local to one clone -- anyone else cloning the repo got no protection for
+# them. Keep them here so the rules travel with the checkout.
+/tests/.env
+/tests/scripts/.env
+.env
+.env.*
+!.env.example
+/.fortisoar/local_data.json
+
+# Local working docs. These hold lab specifics (appliance addresses, credentials,
+# capture dates) that must never reach a public repo.
+/docs/plans/
+/scratch/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.python-version
+
+# Test artifacts and stray logs
+*.log
+
+# macOS
+.DS_Store
