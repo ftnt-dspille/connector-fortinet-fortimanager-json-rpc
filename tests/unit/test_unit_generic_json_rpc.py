@@ -5,6 +5,7 @@ Copyright (c) 2024 Fortinet Inc
 Copyright end
 """
 
+import logging
 import importlib
 import sys
 import os
@@ -262,11 +263,13 @@ class TestLockMinimalScope:
 class TestCommitMinimalScope:
     def test_calls_execute_with_correct_pkg_url(self):
         fmg = MagicMock()
+        fmg.execute.return_value = (0, {})
         commit_minimal_scope(fmg, "root", "pkg", "my_pkg")
         fmg.execute.assert_called_once_with(url="/dvmdb/adom/root/workspace/commit/pkg/my_pkg")
 
     def test_calls_execute_with_correct_dev_url(self):
         fmg = MagicMock()
+        fmg.execute.return_value = (0, {})
         commit_minimal_scope(fmg, "prod", "dev", "FGT_HQ")
         fmg.execute.assert_called_once_with(url="/dvmdb/adom/prod/workspace/commit/dev/FGT_HQ")
 
@@ -278,10 +281,44 @@ class TestCommitMinimalScope:
 class TestUnlockMinimalScope:
     def test_calls_execute_with_correct_pkg_url(self):
         fmg = MagicMock()
+        fmg.execute.return_value = (0, {})
         unlock_minimal_scope(fmg, "root", "pkg", "my_pkg")
         fmg.execute.assert_called_once_with(url="/dvmdb/adom/root/workspace/unlock/pkg/my_pkg")
 
     def test_calls_execute_with_correct_dev_url(self):
         fmg = MagicMock()
+        fmg.execute.return_value = (0, {})
         unlock_minimal_scope(fmg, "prod", "dev", "FGT_HQ")
         fmg.execute.assert_called_once_with(url="/dvmdb/adom/prod/workspace/unlock/dev/FGT_HQ")
+
+
+class TestReleaseStatusIsReported:
+    """
+    A release that fails must not be silent.
+
+    unlock_minimal_scope used to discard the RPC status. An unlock that fails leaves the
+    package or device locked for every other worker until the session ends, and with the
+    status thrown away there was nothing in the log to explain why.
+    """
+
+    def test_failed_unlock_is_logged_as_an_error(self, caplog):
+        fmg = MagicMock()
+        fmg.execute.return_value = (-20055, {})
+        with caplog.at_level(logging.ERROR):
+            unlock_minimal_scope(fmg, "root", "pkg", "my_pkg")
+        assert "Failed to release" in caplog.text
+        assert "-20055" in caplog.text
+
+    def test_successful_unlock_logs_no_error(self, caplog):
+        fmg = MagicMock()
+        fmg.execute.return_value = (0, {})
+        with caplog.at_level(logging.ERROR):
+            unlock_minimal_scope(fmg, "root", "pkg", "my_pkg")
+        assert "Failed to release" not in caplog.text
+
+    def test_failed_commit_is_flagged(self, caplog):
+        fmg = MagicMock()
+        fmg.execute.return_value = (-3, {})
+        with caplog.at_level(logging.WARNING):
+            commit_minimal_scope(fmg, "root", "dev", "FGT_HQ")
+        assert "may not have been persisted" in caplog.text

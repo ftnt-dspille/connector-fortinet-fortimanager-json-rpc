@@ -583,16 +583,36 @@ def lock_minimal_scope(fmg, adom: str, scope_type: str, scope_id: str, url: str,
     return False
 
 
+def _held_for(started_at) -> str:
+    """Human-readable hold time for a lock acquired at `started_at` (time.monotonic())."""
+    if started_at is None:
+        return "not held"
+    return f"{time.monotonic() - started_at:.2f}s"
+
+
 def commit_minimal_scope(fmg, adom: str, scope_type: str, scope_id: str) -> None:
     """Commit workspace changes at package or device scope."""
     commit_url = f"/dvmdb/adom/{adom}/workspace/commit/{scope_type}/{scope_id}"
-    fmg.execute(url=commit_url)
+    status, _ = fmg.execute(url=commit_url)
+    if status != 0:
+        logger.warning(
+            f"Commit returned status {status} for {scope_type}/{scope_id} in ADOM: {adom}. "
+            "The write may not have been persisted.")
 
 
 def unlock_minimal_scope(fmg, adom: str, scope_type: str, scope_id: str) -> None:
     """Release a workspace lock at package or device scope."""
     unlock_url = f"/dvmdb/adom/{adom}/workspace/unlock/{scope_type}/{scope_id}"
-    fmg.execute(url=unlock_url)
+    status, _ = fmg.execute(url=unlock_url)
+    # A non-zero status here used to be discarded. An unlock that silently fails leaves
+    # the scope locked for every other worker until the session ends, which is exactly
+    # the failure that is hardest to diagnose after the fact -- so say so loudly.
+    if status != 0:
+        logger.error(
+            f"Failed to release {scope_type}/{scope_id} lock in ADOM: {adom} (status {status}). "
+            "The lock stays held until this session ends.")
+    else:
+        logger.debug(f"Released {scope_type}/{scope_id} lock in ADOM: {adom}.")
 
 
 def handle_special_cases(fmg, url, data, action_response, task_response=None):
@@ -639,6 +659,20 @@ def perform_rpc_action(action: str, config: dict, params: dict) -> dict:
                 and not requests_server_side_lock(data)
             )
 
+            # Name the reason. "Did this call lock, and if not why not?" is the first
+            # question asked when a workspace goes wrong, and until this line the
+            # no-lock path was entirely silent in the log.
+            if not needs_lock:
+                if action == "get":
+                    skip_reason = "read-only get action"
+                elif not fmg._lock_ctx.uses_workspace:
+                    skip_reason = "workspace mode is not enabled on this appliance"
+                elif url in NO_LOCK_URLS:
+                    skip_reason = "URL is exempt (read-only or locks server-side)"
+                else:
+                    skip_reason = "payload asked FMG to lock server-side (auto_lock_ws)"
+                logger.debug(f"No workspace lock taken for URL: {url} -- {skip_reason}.")
+
             # An ADOM that cannot be locked is not the same as an operation that needs
             # no lock. Say so once, here, and proceed unlocked -- global-ADOM writes are
             # accepted unlocked on 7.6.7, and there is no lock URL to take for them.
@@ -673,7 +707,17 @@ def perform_rpc_action(action: str, config: dict, params: dict) -> dict:
                         # package or device the request touches.
                         scope_type, scope_id = parse_payload_lock_scope(data, known_packages)
 
+            lock_acquired_at = None
+            adom_released_here = False
             if needs_lock:
+                if config.get("minimal_locking", False) and scope_type is None:
+                    # Minimal locking was asked for but nothing finer than the ADOM could
+                    # be resolved. That is the difference between a worker running beside
+                    # its peers and one serialising them, so it should never be silent.
+                    logger.info(
+                        f"Minimal locking is enabled but no package or device scope could be "
+                        f"resolved for URL: {url}. Falling back to locking the whole ADOM: {adom}.")
+                lock_acquired_at = time.monotonic()
                 if scope_type is not None:
                     if not lock_minimal_scope(fmg, adom, scope_type, scope_id, url, data):
                         raise ConnectorError(
@@ -761,6 +805,10 @@ def perform_rpc_action(action: str, config: dict, params: dict) -> dict:
                     if needs_lock and scope_type is None:
                         fmg.commit_changes(adom)
                         fmg.unlock_adom(adom)
+                        adom_released_here = True
+                        logger.debug(
+                            f"Released ADOM lock: {adom} after tracking the task "
+                            f"({_held_for(lock_acquired_at)}).")
             finally:
                 if minimal_lock_held:
                     # Releasing as early as possible keeps other workers moving. Errors are
@@ -773,6 +821,21 @@ def perform_rpc_action(action: str, config: dict, params: dict) -> dict:
                             f"Failed to release minimal lock for {scope_type}/{scope_id} "
                             f"in ADOM: {adom}: {unlock_error}"
                         )
+                # Hold time is the number this whole lock-scoping effort is about: it is
+                # what other workers wait on. Emit it once per call so a slow workspace
+                # can be diagnosed from the log alone, without re-running a probe.
+                if lock_acquired_at is not None:
+                    scope_label = f"{scope_type}/{scope_id}" if scope_type else f"adom/{adom}"
+                    # Minimal scopes are released just above, and the ADOM is released
+                    # explicitly only on the task-tracking path. Otherwise pyFMG drops it
+                    # when the session closes, moments after this line -- so report that
+                    # rather than implying the lock is already free.
+                    if scope_type is not None or adom_released_here:
+                        tail = "released"
+                    else:
+                        tail = "released when the session closes, shortly after this"
+                    logger.info(f"Workspace lock {scope_label} held for "
+                                f"{_held_for(lock_acquired_at)} on URL: {url} ({tail}).")
 
             response["status"] = status
             logger.debug(response)
